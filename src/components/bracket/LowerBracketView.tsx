@@ -1,3 +1,4 @@
+import type { ReactElement } from 'react'
 import type { DEBracketRound, BracketMatchData, BracketSlot } from './bracketUtils'
 
 const SLOT_H = 34
@@ -60,7 +61,7 @@ function MatchBox({ match, top }: { match: BracketMatchData; top: number }) {
 
 // Прямой коннектор: one-to-one (когда число матчей не меняется из-за дропов)
 function StraightConnector({ matchCount, totalH }: { matchCount: number; totalH: number }) {
-  const lines: JSX.Element[] = []
+  const lines: ReactElement[] = []
   for (let i = 0; i < matchCount; i++) {
     const y = matchTopOffset(i, matchCount, totalH) + MATCH_H / 2
     lines.push(
@@ -78,7 +79,7 @@ function StraightConnector({ matchCount, totalH }: { matchCount: number; totalH:
 function BranchingConnector({ fromCount, toCount, totalH }: {
   fromCount: number; toCount: number; totalH: number
 }) {
-  const pairs: JSX.Element[] = []
+  const pairs: ReactElement[] = []
   for (let i = 0; i < toCount; i++) {
     const topMatchIdx = i * 2
     const botMatchIdx = i * 2 + 1

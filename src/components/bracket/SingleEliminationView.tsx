@@ -79,8 +79,6 @@ function ConnectorColumn({ fromRoundIndex, matchCount }: { fromRoundIndex: numbe
     <div style={{ width: CONNECTOR_W, flexShrink: 0, position: 'relative' }}>
       {Array.from({ length: pairCount }, (_, i) => {
         const pairTop = i * pairH
-        const centerTop = pairTop + halfH / 2 + (MATCH_H / 2) - matchTopOffset(fromRoundIndex)
-        const centerBottom = pairTop + pairH - halfH / 2 - (MATCH_H / 2) + matchTopOffset(fromRoundIndex)
         const lineTop = matchTopOffset(fromRoundIndex) + SLOT_H + pairTop   // center of top match
         const lineBottom = pairTop + halfH + matchTopOffset(fromRoundIndex) + SLOT_H  // center of bottom match
 
@@ -130,8 +128,6 @@ interface Props {
 
 export default function SingleEliminationView({ name, rounds, thirdPlaceMatch }: Props) {
   if (rounds.length === 0) return null
-
-  const totalHeight = UNIT * rounds[0].matches.length - GAP
 
   return (
     <div style={{ marginBottom: 32 }}>
