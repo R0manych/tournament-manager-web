@@ -1,6 +1,5 @@
 export type TournamentStatus = 'Draft' | 'Active' | 'Completed' | 'Cancelled'
 export type MatchStatus = 'Scheduled' | 'InProgress' | 'Completed' | 'Cancelled'
-export type MatchStage = 'Pool' | 'RoundOf16' | 'QuarterFinal' | 'SemiFinal' | 'Final' | 'ThirdPlace'
 
 export interface Fighter {
   id: string
@@ -55,7 +54,6 @@ export interface Match {
   tournamentId: string
   fighter1Id: string
   fighter2Id: string
-  stage: MatchStage
   scheduledAt?: string
   status: MatchStatus
   score1: number
@@ -132,7 +130,6 @@ export type UpdateFighterRequest = CreateFighterRequest
 export interface CreateMatchRequest {
   fighter1Id: string
   fighter2Id: string
-  stage: MatchStage
   scheduledAt?: string
   roundDurationSeconds?: number
   totalRounds?: number

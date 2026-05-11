@@ -1,6 +1,12 @@
 import { api } from './client'
 import type { Match, MatchStatus, CreateMatchRequest, AddExchangeRequest } from './types'
 
+export interface GenerateRoundRobinResponse {
+  created: number
+  skipped: number
+  matches: Match[]
+}
+
 export const matchesApi = {
   listByTournament: (tournamentId: string) =>
     api.get<Match[]>(`/tournaments/${tournamentId}/matches`),
@@ -8,6 +14,11 @@ export const matchesApi = {
   create: (tournamentId: string, data: CreateMatchRequest) =>
     api.post<Match>(`/tournaments/${tournamentId}/matches`, data),
   delete: (id: string) => api.delete(`/matches/${id}`),
+  generateRoundRobin: (tournamentId: string, phaseId: string, groups: string[][]) =>
+    api.post<GenerateRoundRobinResponse>(
+      `/tournaments/${tournamentId}/matches/generate-round-robin`,
+      { phaseId, groups }
+    ),
 
   setStatus: (id: string, status: MatchStatus) =>
     api.patch<Match>(`/matches/${id}/status`, { status }),
