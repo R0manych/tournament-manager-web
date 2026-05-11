@@ -24,3 +24,4 @@ dist-ssr
 *.sw?
 
 /scripts/release.sh
+/.claude/settings.local.json
