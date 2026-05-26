@@ -371,24 +371,30 @@ export function resolveDERoundPairs(
   }
   const lbDirectSlots = lbSlots.map(s => resolveSlot(s.source, s.rank))
 
+  const hasRoundMatches = (pairs: Pair[]): boolean =>
+    pairs.some(([f1, f2]) => !!(f1 && f2 && findMatch(f1, f2)))
+
   const ubPairs: Pair[][] = []
   {
     const r0: Pair[] = []
     for (let i = 0; i + 1 < ubDirectSlots.length; i += 2)
       r0.push([ubDirectSlots[i], ubDirectSlots[i + 1]])
-    ubPairs.push(r0)
-    for (let ri = 1; ri < ubRounds.length; ri++) {
-      const byes = ubByesByRound[ubRounds[ri].id] ?? []
-      const prevWinners = ubPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
-      let pairs: Pair[]
-      if (byes.length > 0) {
-        pairs = prevWinners.map((w, idx) => [w, byes[idx] ?? null] as Pair)
-      } else {
-        pairs = []
-        for (let i = 0; i + 1 < prevWinners.length; i += 2)
-          pairs.push([prevWinners[i], prevWinners[i + 1]])
+    // Only resolve names if UB first-round matches actually exist in the DB
+    if (hasRoundMatches(r0)) {
+      ubPairs.push(r0)
+      for (let ri = 1; ri < ubRounds.length; ri++) {
+        const byes = ubByesByRound[ubRounds[ri].id] ?? []
+        const prevWinners = ubPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
+        let pairs: Pair[]
+        if (byes.length > 0) {
+          pairs = prevWinners.map((w, idx) => [w, byes[idx] ?? null] as Pair)
+        } else {
+          pairs = []
+          for (let i = 0; i + 1 < prevWinners.length; i += 2)
+            pairs.push([prevWinners[i], prevWinners[i + 1]])
+        }
+        ubPairs.push(pairs)
       }
-      ubPairs.push(pairs)
     }
   }
 
@@ -397,26 +403,29 @@ export function resolveDERoundPairs(
     const r0: Pair[] = []
     for (let i = 0; i + 1 < lbDirectSlots.length; i += 2)
       r0.push([lbDirectSlots[i], lbDirectSlots[i + 1]])
-    lbPairs.push(r0)
-    for (let ri = 1; ri < lbRounds.length; ri++) {
-      const round = lbRounds[ri]
-      const prevWinners = lbPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
-      let slotsForRound: (string | null)[] = [...prevWinners]
-      if (round.dropdownsFrom) {
-        const ubRi = ubRounds.findIndex(r => r.id === round.dropdownsFrom)
-        if (ubRi >= 0) {
-          const losers = ubPairs[ubRi].map(([f1, f2]) => (f1 && f2) ? matchLoser(f1, f2) : null)
-          slotsForRound = []
-          for (let i = 0; i < prevWinners.length; i++) {
-            slotsForRound.push(prevWinners[i])
-            slotsForRound.push(losers[i] ?? null)
+    // Only resolve names if LB first-round matches actually exist in the DB
+    if (hasRoundMatches(r0)) {
+      lbPairs.push(r0)
+      for (let ri = 1; ri < lbRounds.length; ri++) {
+        const round = lbRounds[ri]
+        const prevWinners = lbPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
+        let slotsForRound: (string | null)[] = [...prevWinners]
+        if (round.dropdownsFrom) {
+          const ubRi = ubRounds.findIndex(r => r.id === round.dropdownsFrom)
+          if (ubRi >= 0) {
+            const losers = ubPairs[ubRi].map(([f1, f2]) => (f1 && f2) ? matchLoser(f1, f2) : null)
+            slotsForRound = []
+            for (let i = 0; i < prevWinners.length; i++) {
+              slotsForRound.push(prevWinners[i])
+              slotsForRound.push(losers[i] ?? null)
+            }
           }
         }
+        const pairs: Pair[] = []
+        for (let i = 0; i + 1 < slotsForRound.length; i += 2)
+          pairs.push([slotsForRound[i], slotsForRound[i + 1]])
+        lbPairs.push(pairs)
       }
-      const pairs: Pair[] = []
-      for (let i = 0; i + 1 < slotsForRound.length; i += 2)
-        pairs.push([slotsForRound[i], slotsForRound[i + 1]])
-      lbPairs.push(pairs)
     }
   }
 
