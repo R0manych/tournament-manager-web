@@ -1,5 +1,5 @@
 import type { Match, TournamentFormat, TournamentParticipant } from '../../api/types'
-import { assignGroups, buildBracketRounds, calculateGroupStandings, resolvePlayoffSlots } from './bracketUtils'
+import { assignGroups, buildBracketRounds, calculateGroupStandings, resolvePlayoffSlots, resolveDERoundPairs } from './bracketUtils'
 import type { DEPhase } from './bracketUtils'
 import RoundRobinPhaseView from './RoundRobinPhaseView'
 import SingleEliminationView from './SingleEliminationView'
@@ -20,17 +20,21 @@ export default function TournamentBracketView({ format, participants, fightDurat
         Участников: {format.participants.count}
         {' · '}Посев: {format.participants.seeding === 'ranked' ? 'по рейтингу' : 'случайный'}
         {displayDuration && ` · Время боя: ${displayDuration}с`}
-      </div>
+      </div> 
 
       {format.phases.map(phase => {
         if (phase.type === 'roundRobin') {
           const p = phase as any
           const groups = assignGroups(phase as any, participants)
+          const standings = allMatches
+            ? calculateGroupStandings(phase, groups, allMatches)
+            : undefined
           return (
             <RoundRobinPhaseView
               key={phase.id}
               name={phase.name}
               groups={groups}
+              standings={standings}
               pointsPerMatch={p.pointsPerMatch}
             />
           )
@@ -44,7 +48,20 @@ export default function TournamentBracketView({ format, participants, fightDurat
             if (rrPhase) {
               const groupAssignments = assignGroups(rrPhase as any, participants)
               const standings = calculateGroupStandings(rrPhase, groupAssignments, allMatches)
-              resolvedIds = resolvePlayoffSlots(phase as any, standings)
+              const candidateIds = resolvePlayoffSlots(phase as any, standings)
+              // Only show resolved names if playoff matches have actually been generated.
+              // generatePlayoffMut creates all first-round matches at once, so checking
+              // any one of the expected pairs is sufficient.
+              const hasPlayoffMatches = candidateIds.some((id, i) => {
+                if (i % 2 !== 0) return false
+                const f1 = id, f2 = candidateIds[i + 1]
+                if (!f1 || !f2) return false
+                return allMatches.some(m =>
+                  (m.fighter1Id === f1 && m.fighter2Id === f2) ||
+                  (m.fighter1Id === f2 && m.fighter2Id === f1)
+                )
+              })
+              if (hasPlayoffMatches) resolvedIds = candidateIds
             }
           }
           const rounds = buildBracketRounds(phase as any, resolvedIds, participants, allMatches)
@@ -59,11 +76,30 @@ export default function TournamentBracketView({ format, participants, fightDurat
         }
 
         if (phase.type === 'doubleElimination') {
+          const dePhase = phase as unknown as DEPhase
+          let ubPairs: ([string | null, string | null])[][] | undefined
+          let lbPairs: ([string | null, string | null])[][] | undefined
+          if (allMatches) {
+            const fromPhaseId = dePhase.upperBracket.slots[0]?.source?.split('.')?.[0]
+            if (fromPhaseId) {
+              const rrPhase = format.phases.find(ph => ph.id === fromPhaseId)
+              if (rrPhase) {
+                const groupAssignments = assignGroups(rrPhase as any, participants)
+                const standings = calculateGroupStandings(rrPhase, groupAssignments, allMatches)
+                const resolved = resolveDERoundPairs(dePhase, standings, allMatches)
+                ubPairs = resolved.ubPairs
+                lbPairs = resolved.lbPairs
+              }
+            }
+          }
           return (
             <DoubleEliminationView
               key={phase.id}
               name={phase.name}
-              phase={phase as unknown as DEPhase}
+              phase={dePhase}
+              participants={participants}
+              ubPairs={ubPairs}
+              lbPairs={lbPairs}
             />
           )
         }

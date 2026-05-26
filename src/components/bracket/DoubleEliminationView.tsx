@@ -1,23 +1,30 @@
+import type { TournamentParticipant } from '../../api/types'
 import type { DEPhase } from './bracketUtils'
 import { buildUBRounds, buildLBRounds } from './bracketUtils'
-import SingleEliminationView from './SingleEliminationView'
 import LowerBracketView from './LowerBracketView'
 
 interface Props {
   name: string
   phase: DEPhase
+  participants?: TournamentParticipant[]
+  ubPairs?: ([string | null, string | null])[][]
+  lbPairs?: ([string | null, string | null])[][]
 }
 
-export default function DoubleEliminationView({ name, phase }: Props) {
-  const ubRounds = buildUBRounds(phase)
-  const lbRounds = buildLBRounds(phase)
+export default function DoubleEliminationView({ name, phase, participants, ubPairs, lbPairs }: Props) {
+  const ubRounds = buildUBRounds(phase, ubPairs, participants)
+  const lbRounds = buildLBRounds(phase, lbPairs, participants)
 
   return (
     <div style={{ marginBottom: 32 }}>
       <h3 style={{ marginBottom: 4, color: '#444' }}>{name}</h3>
       <p style={{ fontSize: 13, color: '#888', marginBottom: 16 }}>
         Double elimination ·{' '}
-        {phase.grandFinal === 'reset' ? 'Большой финал с bracket reset' : 'Большой финал (один матч)'}
+        {phase.grandFinal === 'reset'
+          ? 'Большой финал с bracket reset'
+          : phase.grandFinal === 'advantage'
+          ? 'Большой финал — серия до 2 побед, upper стартует 1:0'
+          : 'Большой финал (один матч)'}
       </p>
 
       {/* Upper Bracket */}
@@ -36,11 +43,7 @@ export default function DoubleEliminationView({ name, phase }: Props) {
         }}>
           Верхняя сетка
         </div>
-        <SingleEliminationView
-          name=""
-          rounds={ubRounds}
-          thirdPlaceMatch={false}
-        />
+        <LowerBracketView rounds={ubRounds} />
       </div>
 
       {/* Lower Bracket */}
@@ -90,9 +93,11 @@ export default function DoubleEliminationView({ name, phase }: Props) {
           <div style={{ height: 1, background: '#e8e8e8' }} />
           <GrandFinalSlot label="Победитель LB" color="#b45309" />
         </div>
-        {phase.grandFinal === 'reset' && (
+        {(phase.grandFinal === 'reset' || phase.grandFinal === 'advantage') && (
           <p style={{ fontSize: 12, color: '#7c3aed', marginTop: 6 }}>
-            * При победе представителя нижней сетки — второй матч (bracket reset)
+            {phase.grandFinal === 'reset'
+              ? '* При победе представителя нижней сетки — второй матч (bracket reset, счёт 0:0)'
+              : '* При победе представителя нижней сетки — второй матч (счёт 1:1, победитель второго — чемпион)'}
           </p>
         )}
       </div>

@@ -203,6 +203,179 @@ export default function TournamentDetailPage() {
     },
   })
 
+  const generateDEMut = useMutation({
+    mutationFn: async (phaseId: string) => {
+      const dePhase = format!.phases.find(p => p.id === phaseId)! as any
+      const ubSlotDefs: Array<{ source: string; rank: number; entersAt?: string }> = dePhase.upperBracket.slots
+      const lbSlotDefs: Array<{ source: string; rank: number }> = dePhase.lowerBracket.slots
+      const ubRounds: Array<{ id: string; name: string }> = dePhase.upperBracket.rounds
+      const lbRounds: Array<{ id: string; name: string; dropdownsFrom?: string }> = dePhase.lowerBracket.rounds
+
+      // Determine source RR phase from first UB slot
+      const fromPhaseId: string | undefined = ubSlotDefs[0]?.source?.split('.')?.[0]
+      if (!fromPhaseId) throw new Error('Не удалось определить фазу источника.')
+      const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)
+      if (!rrPhase) throw new Error(`Фаза '${fromPhaseId}' не найдена.`)
+
+      const groupAssignments = assignGroups(rrPhase as any, tournament!.participants)
+      const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, tournamentMatches ?? [])
+
+      const resolveSlot = (source: string, rank: number): string | null => {
+        const parts = source.split('.')
+        if (parts.length < 2) return null
+        const groupIdx = parts[1].charCodeAt(0) - 65  // 'A'→0, 'B'→1, …
+        return groupStandings[groupIdx]?.[rank - 1]?.fighterId ?? null
+      }
+
+      const allTMs = tournamentMatches ?? []
+      const findMatch = (f1: string, f2: string) =>
+        allTMs.find(m =>
+          (m.fighter1Id === f1 && m.fighter2Id === f2) ||
+          (m.fighter1Id === f2 && m.fighter2Id === f1)
+        )
+      const matchWinner = (f1: string, f2: string): string | null => {
+        const m = findMatch(f1, f2)
+        return m?.status === 'Completed' && m.winnerId ? m.winnerId : null
+      }
+      const matchLoser = (f1: string, f2: string): string | null => {
+        const m = findMatch(f1, f2)
+        if (m?.status === 'Completed' && m.winnerId)
+          return m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id
+        return null
+      }
+
+      // Resolve initial fighters
+      const ubDirectSlots = ubSlotDefs.filter(s => !s.entersAt).map(s => resolveSlot(s.source, s.rank))
+      const ubByesByRound: Record<string, (string | null)[]> = {}
+      for (const s of ubSlotDefs.filter(s => s.entersAt)) {
+        if (!ubByesByRound[s.entersAt!]) ubByesByRound[s.entersAt!] = []
+        ubByesByRound[s.entersAt!].push(resolveSlot(s.source, s.rank))
+      }
+      const lbDirectSlots = lbSlotDefs.map(s => resolveSlot(s.source, s.rank))
+
+      type Pair = [string | null, string | null]
+
+      // Pre-compute UB round pairs (null where result not yet known)
+      const ubRoundPairs: Pair[][] = []
+      {
+        const r0: Pair[] = []
+        for (let i = 0; i + 1 < ubDirectSlots.length; i += 2)
+          r0.push([ubDirectSlots[i], ubDirectSlots[i + 1]])
+        ubRoundPairs.push(r0)
+
+        for (let ri = 1; ri < ubRounds.length; ri++) {
+          const byes = ubByesByRound[ubRounds[ri].id] ?? []
+          const prevWinners = ubRoundPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
+          let pairs: Pair[]
+          if (byes.length > 0) {
+            pairs = prevWinners.map((w, i) => [w, byes[i] ?? null] as Pair)
+          } else {
+            pairs = []
+            for (let i = 0; i + 1 < prevWinners.length; i += 2)
+              pairs.push([prevWinners[i], prevWinners[i + 1]])
+          }
+          ubRoundPairs.push(pairs)
+        }
+      }
+
+      // Pre-compute LB round pairs
+      const lbRoundPairs: Pair[][] = []
+      {
+        const r0: Pair[] = []
+        for (let i = 0; i + 1 < lbDirectSlots.length; i += 2)
+          r0.push([lbDirectSlots[i], lbDirectSlots[i + 1]])
+        lbRoundPairs.push(r0)
+
+        for (let ri = 1; ri < lbRounds.length; ri++) {
+          const round = lbRounds[ri]
+          const prevWinners = lbRoundPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
+          let slotsForRound: (string | null)[] = [...prevWinners]
+
+          if (round.dropdownsFrom) {
+            const ubRi = ubRounds.findIndex(r => r.id === round.dropdownsFrom)
+            if (ubRi >= 0) {
+              const losers = ubRoundPairs[ubRi].map(([f1, f2]) => (f1 && f2) ? matchLoser(f1, f2) : null)
+              slotsForRound = []
+              for (let i = 0; i < prevWinners.length; i++) {
+                slotsForRound.push(prevWinners[i])
+                slotsForRound.push(losers[i] ?? null)
+              }
+            }
+          }
+
+          const pairs: Pair[] = []
+          for (let i = 0; i + 1 < slotsForRound.length; i += 2)
+            pairs.push([slotsForRound[i], slotsForRound[i + 1]])
+          lbRoundPairs.push(pairs)
+        }
+      }
+
+      // Helpers
+      const isComplete = (pairs: Pair[]): boolean =>
+        pairs.every(([f1, f2]) => !!(f1 && f2 && findMatch(f1, f2)?.status === 'Completed'))
+      const hasUnfinished = (pairs: Pair[]): boolean =>
+        pairs.some(([f1, f2]) => {
+          if (!f1 || !f2) return false
+          const m = findMatch(f1, f2)
+          return !!(m && m.status !== 'Completed')
+        })
+
+      const creates: Array<[string, string]> = []
+      const generateRound = (pairs: Pair[]): boolean => {
+        let made = false
+        for (const [f1, f2] of pairs) {
+          if (!f1 || !f2) continue
+          if (!findMatch(f1, f2)) { creates.push([f1, f2]); made = true }
+        }
+        return made
+      }
+
+      // Walk UB: generate the next round that can be generated
+      for (let ri = 0; ri < ubRoundPairs.length; ri++) {
+        if (ri > 0 && !isComplete(ubRoundPairs[ri - 1])) break
+        if (generateRound(ubRoundPairs[ri])) break
+        if (hasUnfinished(ubRoundPairs[ri])) break
+      }
+
+      // Walk LB: same logic, also wait for dropdown source in UB to complete
+      for (let ri = 0; ri < lbRoundPairs.length; ri++) {
+        if (ri > 0 && !isComplete(lbRoundPairs[ri - 1])) break
+        const dropFrom = lbRounds[ri]?.dropdownsFrom
+        if (dropFrom) {
+          const ubRi = ubRounds.findIndex(r => r.id === dropFrom)
+          if (ubRi >= 0 && !isComplete(ubRoundPairs[ubRi])) break
+        }
+        if (generateRound(lbRoundPairs[ri])) break
+        if (hasUnfinished(lbRoundPairs[ri])) break
+      }
+
+      // Grand Final: after both bracket finals are complete
+      const ubFP = ubRoundPairs[ubRoundPairs.length - 1]
+      const lbFP = lbRoundPairs[lbRoundPairs.length - 1]
+      if (ubFP && lbFP && isComplete(ubFP) && isComplete(lbFP)) {
+        const ubW = ubFP[0] ? matchWinner(ubFP[0][0]!, ubFP[0][1]!) : null
+        const lbW = lbFP[0] ? matchWinner(lbFP[0][0]!, lbFP[0][1]!) : null
+        if (ubW && lbW && !findMatch(ubW, lbW)) creates.push([ubW, lbW])
+      }
+
+      if (creates.length === 0)
+        throw new Error('Нет встреч для генерации. Завершите текущие бои, чтобы сформировать следующий раунд.')
+
+      return Promise.all(creates.map(([f1, f2]) => matchesApi.create(id!, { fighter1Id: f1, fighter2Id: f2 })))
+    },
+    onSuccess: (results) => {
+      qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
+      qc.invalidateQueries({ queryKey: ['tournaments', id] })
+      alert(`Создано встреч: ${results.length}`)
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error
+        ? err.message
+        : ((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка генерации DE плейофф')
+      alert(msg)
+    },
+  })
+
   const randomResultsMut = useMutation({
     mutationFn: async () => {
       const pending = (tournamentMatches ?? []).filter(
@@ -243,6 +416,7 @@ export default function TournamentDetailPage() {
   const transitions = STATUS_TRANSITIONS[tournament.status]
   const roundRobinPhases = format?.phases.filter(p => p.type === 'roundRobin') ?? []
   const sePhases = format?.phases.filter(p => p.type === 'singleElimination') ?? []
+  const dePhases = format?.phases.filter(p => p.type === 'doubleElimination') ?? []
 
   const registeredIds = new Set(tournament.participants.map(p => p.fighterId))
   const available = (allFighters ?? []).filter(f => !registeredIds.has(f.id))
@@ -301,9 +475,24 @@ export default function TournamentDetailPage() {
               key={phase.id}
               onClick={() => generatePlayoffMut.mutate(phase.id)}
               disabled={generatePlayoffMut.isPending}
-              title="Сгенерировать встречи первого раунда плейофф по итогам группового этапа"
+              title="Сгенерировать встречи текущего раунда плейофф по итогам предыдущего"
             >
               {generatePlayoffMut.isPending ? '…' : `⚙ Сгенерировать плейофф: ${phase.name}`}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {dePhases.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          {dePhases.map(phase => (
+            <button
+              key={phase.id}
+              onClick={() => generateDEMut.mutate(phase.id)}
+              disabled={generateDEMut.isPending}
+              title="Сгенерировать следующий раунд double elimination (UB и LB независимо)"
+            >
+              {generateDEMut.isPending ? '…' : `⚙ Сгенерировать DE плейофф: ${phase.name}`}
             </button>
           ))}
         </div>

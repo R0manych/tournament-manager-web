@@ -9,7 +9,7 @@ const CONNECTOR_W = 24          // width of the connecting column (px)
 const ROUND_W = 180             // width of each round column (px)
 
 function matchWrapperHeight(roundIndex: number) {
-  return UNIT * Math.pow(2, roundIndex) - GAP
+  return UNIT * Math.pow(2, roundIndex)
 }
 
 function matchTopOffset(roundIndex: number) {
@@ -79,8 +79,8 @@ function ConnectorColumn({ fromRoundIndex, matchCount }: { fromRoundIndex: numbe
     <div style={{ width: CONNECTOR_W, flexShrink: 0, position: 'relative' }}>
       {Array.from({ length: pairCount }, (_, i) => {
         const pairTop = i * pairH
-        const lineTop = matchTopOffset(fromRoundIndex) + SLOT_H + pairTop   // center of top match
-        const lineBottom = pairTop + halfH + matchTopOffset(fromRoundIndex) + SLOT_H  // center of bottom match
+        const lineTop = matchTopOffset(fromRoundIndex) + SLOT_H            // center of top match (SVG-relative)
+        const lineBottom = halfH + matchTopOffset(fromRoundIndex) + SLOT_H // center of bottom match (SVG-relative)
 
         return (
           <svg
