@@ -16,7 +16,6 @@ export default function TournamentCreatePage() {
     startDate: '',
     endDate: '',
     defaultRoundDurationSeconds: undefined,
-    defaultRoundsPerMatch: undefined,
     defaultMaxDoubles: undefined,
     defaultMaxWarnings: undefined,
   })
@@ -31,7 +30,6 @@ export default function TournamentCreatePage() {
         startDate: form.startDate,
         endDate: form.endDate,
         ...(form.defaultRoundDurationSeconds != null && { defaultRoundDurationSeconds: form.defaultRoundDurationSeconds }),
-        ...(form.defaultRoundsPerMatch != null && { defaultRoundsPerMatch: form.defaultRoundsPerMatch }),
         ...(form.defaultMaxDoubles != null && { defaultMaxDoubles: form.defaultMaxDoubles }),
         ...(form.defaultMaxWarnings != null && { defaultMaxWarnings: form.defaultMaxWarnings }),
       }
@@ -142,16 +140,6 @@ export default function TournamentCreatePage() {
                 onChange={e => handleNumericField('defaultRoundDurationSeconds', e.target.value)}
                 style={{ ...inputStyle, width: 100 }}
                 placeholder="180"
-              />
-            </label>
-            <label style={labelStyle}>
-              Количество раундов
-              <input
-                type="number" min={1}
-                value={form.defaultRoundsPerMatch ?? ''}
-                onChange={e => handleNumericField('defaultRoundsPerMatch', e.target.value)}
-                style={{ ...inputStyle, width: 100 }}
-                placeholder="3"
               />
             </label>
             <label style={labelStyle}>

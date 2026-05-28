@@ -28,6 +28,13 @@ export interface DEBracketRound extends BracketRoundData {
   dropFromRoundName?: string  // название раунда UB, откуда пришли дропы
 }
 
+// ── Phase standings cache ─────────────────────────────────────────────────
+// Built in phase-declaration order so later phases can resolve from earlier ones.
+export type PhaseStandingsCache = Map<string, {
+  assignments: GroupAssignment[]
+  standings: GroupStanding[][]
+}>
+
 // ── Snake seeding ──────────────────────────────────────────────────────────
 // seed 1→A, 2→B, 3→C, 4→D, 5→D, 6→C, 7→B, 8→A, 9→A, ...
 export function assignGroups(
@@ -56,10 +63,66 @@ export function assignGroups(
   return groups
 }
 
+// ── Explicit group seeding (phase.seeding.groups is defined) ──────────────
+// Resolves participants from previous-phase standings stored in the cache.
+// Falls back to placeholder names for unresolved slots.
+export function assignGroupsFromExplicitSeeding(
+  phase: TournamentFormat['phases'][0] & { type: 'roundRobin' },
+  cache: PhaseStandingsCache,
+): GroupAssignment[] {
+  const p = phase as any
+  const groupCount = p.groups?.count ?? 1
+  const seedingGroups = p.seeding?.groups as Record<string, Array<{ source: string; rank: number }>> | undefined
+
+  const groups: GroupAssignment[] = Array.from({ length: groupCount }, (_, i) => ({
+    groupIndex: i,
+    groupLabel: String.fromCharCode(65 + i),
+    participants: [],
+  }))
+
+  if (!seedingGroups) return groups
+
+  Object.entries(seedingGroups).forEach(([groupLabel, slots]) => {
+    const groupIndex = groupLabel.charCodeAt(0) - 65
+    if (groupIndex < 0 || groupIndex >= groups.length) return
+
+    slots.forEach((slot, slotIdx) => {
+      const parts = slot.source.split('.')
+      if (parts.length < 2) return
+      const sourcePhaseId = parts[0]
+      const sourceGroupLabel = parts[1]
+      const sourceGroupIndex = sourceGroupLabel.charCodeAt(0) - 65
+
+      const sourceData = cache.get(sourcePhaseId)
+      if (sourceData) {
+        const standingEntry = sourceData.standings[sourceGroupIndex]?.[slot.rank - 1]
+        if (standingEntry) {
+          const participantInfo = sourceData.assignments[sourceGroupIndex]?.participants
+            .find(px => px.fighterId === standingEntry.fighterId)
+          if (participantInfo) {
+            groups[groupIndex].participants.push(participantInfo)
+            return
+          }
+        }
+      }
+
+      // Source phase not yet resolved — show a labelled placeholder
+      groups[groupIndex].participants.push({
+        fighterId: `__placeholder__${slot.source}:${slot.rank}`,
+        seed: slotIdx + 1,
+        name: `Гр. ${sourceGroupLabel} #${slot.rank}`,
+      })
+    })
+  })
+
+  return groups
+}
+
 // ── Shared slot label formatter ────────────────────────────────────────────
+// Handles any phaseId.GroupLabel pattern (e.g. groups.A, groups1.A, groups2.B)
 export function formatSlotLabel(source: string, rank: number, isDropdown = false): BracketSlot {
   const parts = source.split('.')
-  if (parts[0] === 'groups' && parts[1]) {
+  if (parts.length === 2 && /^[A-Z]$/.test(parts[1])) {
     return { label: `Группа ${parts[1]}`, sublabel: `место ${rank}`, isDropdown }
   }
   return { label: source, sublabel: `место ${rank}`, isDropdown }
@@ -159,7 +222,7 @@ export interface DEPhase {
     slots: Array<{ source: string; rank: number }>
     rounds: Array<{ id: string; name: string; dropdownsFrom?: string }>
   }
-  overrides?: Array<{ roundId: string; roundsPerMatch?: number; roundDurationSeconds?: number }>
+  overrides?: Array<{ roundId: string; roundDurationSeconds?: number }>
 }
 
 // Computes match count per UB round using the same round-by-round logic as the backend validator.

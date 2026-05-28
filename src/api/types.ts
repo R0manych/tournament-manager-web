@@ -30,7 +30,6 @@ export interface Tournament {
   endDate: string
   status: TournamentStatus
   defaultRoundDurationSeconds?: number
-  defaultRoundsPerMatch?: number
   defaultMaxDoubles?: number
   defaultMaxWarnings?: number
   createdAt: string
@@ -63,11 +62,9 @@ export interface Match {
   doubleHitsCount: number
   winnerId?: string
   roundDurationSeconds?: number
-  totalRounds?: number
   maxDoubles?: number
   maxWarnings?: number
   effectiveRoundDurationSeconds?: number
-  effectiveTotalRounds?: number
   effectiveMaxDoubles?: number
   effectiveMaxWarnings?: number
   startedAt?: string
@@ -85,7 +82,6 @@ export interface TournamentFormat {
   description?: string
   defaults: {
     roundDurationSeconds?: number
-    roundsPerMatch?: number
     maxDoubles?: number
     maxWarnings?: number
   }
@@ -110,7 +106,6 @@ export interface CreateTournamentRequest {
   startDate: string
   endDate: string
   defaultRoundDurationSeconds?: number
-  defaultRoundsPerMatch?: number
   defaultMaxDoubles?: number
   defaultMaxWarnings?: number
 }
@@ -132,7 +127,6 @@ export interface CreateMatchRequest {
   fighter2Id: string
   scheduledAt?: string
   roundDurationSeconds?: number
-  totalRounds?: number
   maxDoubles?: number
   maxWarnings?: number
 }

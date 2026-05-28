@@ -376,6 +376,28 @@ export default function TournamentDetailPage() {
     },
   })
 
+  const addRandomFightersMut = useMutation({
+    mutationFn: async (count: number) => {
+      const pool = [...available].sort(() => Math.random() - 0.5).slice(0, count)
+      if (pool.length === 0) throw new Error('Нет доступных бойцов для добавления')
+      const existingCount = tournament!.participants.length
+      for (let i = 0; i < pool.length; i++) {
+        await tournamentsApi.addParticipant(id!, pool[i].id, existingCount + i + 1)
+      }
+      return pool.length
+    },
+    onSuccess: (count) => {
+      qc.invalidateQueries({ queryKey: ['tournaments', id] })
+      alert(`Добавлено бойцов: ${count}`)
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error
+        ? err.message
+        : ((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка добавления бойцов')
+      alert(msg)
+    },
+  })
+
   const randomResultsMut = useMutation({
     mutationFn: async () => {
       const pending = (tournamentMatches ?? []).filter(
@@ -510,7 +532,22 @@ export default function TournamentDetailPage() {
         </button>
       </div>
 
-      <h2>Участники ({tournament.participants.length})</h2>
+      <h2>
+        Участники ({tournament.participants.length})
+        <span style={{ marginLeft: 12, display: 'inline-flex', gap: 6 }}>
+          {[8, 16, 32, 64].map(n => (
+            <button
+              key={n}
+              onClick={() => addRandomFightersMut.mutate(n)}
+              disabled={addRandomFightersMut.isPending}
+              title={`Тестовая функция: создать и добавить ${n} случайных бойцов`}
+              style={{ fontSize: '0.8em', color: '#999', background: 'none', border: '1px dashed #ccc', borderRadius: 4, padding: '3px 10px', cursor: 'pointer' }}
+            >
+              {addRandomFightersMut.isPending ? '…' : `+${n} бойцов (тест)`}
+            </button>
+          ))}
+        </span>
+      </h2>
 
       {tournament.participants.length === 0 ? (
         <p style={{ color: '#888' }}>Участников нет</p>
