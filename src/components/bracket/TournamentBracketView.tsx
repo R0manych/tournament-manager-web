@@ -1,6 +1,6 @@
 import type { Match, TournamentFormat, TournamentParticipant } from '../../api/types'
 import {
-  assignGroups, assignGroupsFromExplicitSeeding,
+  assignGroups, assignGroupsFromExplicitSeeding, buildSwissPool,
   buildBracketRounds, calculateGroupStandings, resolvePlayoffSlots, resolveDERoundPairs,
   type PhaseStandingsCache,
 } from './bracketUtils'
@@ -8,6 +8,7 @@ import type { DEPhase } from './bracketUtils'
 import RoundRobinPhaseView from './RoundRobinPhaseView'
 import SingleEliminationView from './SingleEliminationView'
 import DoubleEliminationView from './DoubleEliminationView'
+import SwissPhaseView, { type SwissPhaseData } from './SwissPhaseView'
 
 interface Props {
   format: TournamentFormat
@@ -61,7 +62,7 @@ export default function TournamentBracketView({ format, participants, fightDurat
               ? new Set(sourceCached.assignments.flatMap(g => g.participants.map(px => px.fighterId)))
               : new Set<string>()
             const sourceHasCompleted = allMatches
-              ? allMatches.some(m => m.status === 'Completed' && sourceIds.has(m.fighter1Id) && sourceIds.has(m.fighter2Id))
+              ? allMatches.some(m => m.status === 'Completed' && sourceIds.has(m.fighter1Id) && m.fighter2Id != null && sourceIds.has(m.fighter2Id))
               : false
 
             if (!sourceHasCompleted) {
@@ -107,6 +108,25 @@ export default function TournamentBracketView({ format, participants, fightDurat
               name={phase.name}
               rounds={rounds}
               thirdPlaceMatch={p.thirdPlaceMatch}
+            />
+          )
+        }
+
+        if (phase.type === 'swiss') {
+          // Simple swiss: single pool of all participants, ranked like a one-group
+          // round robin. Group-swiss (multiple pools) is deferred.
+          const sp = phase as unknown as SwissPhaseData
+          const pool = buildSwissPool(participants)
+          const standings = allMatches
+            ? calculateGroupStandings(phase, [pool], allMatches)[0]
+            : undefined
+          return (
+            <SwissPhaseView
+              key={phase.id}
+              name={phase.name}
+              phase={sp}
+              pool={pool}
+              standings={standings}
             />
           )
         }

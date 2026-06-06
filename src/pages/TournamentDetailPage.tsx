@@ -6,7 +6,7 @@ import { matchesApi } from '../api/matches'
 import { fightersApi } from '../api/fighters'
 import type { TournamentStatus } from '../api/types'
 import TournamentFormatSection from '../components/TournamentFormatSection'
-import { assignGroups, calculateGroupStandings, resolvePlayoffSlots } from '../components/bracket/bracketUtils'
+import { assignGroups, buildSwissPool, calculateGroupStandings, planSwissNextRound, resolvePlayoffSlots } from '../components/bracket/bracketUtils'
 
 const STATUS_LABELS: Record<TournamentStatus, string> = {
   Draft: 'Черновик',
@@ -240,7 +240,7 @@ export default function TournamentDetailPage() {
       const matchLoser = (f1: string, f2: string): string | null => {
         const m = findMatch(f1, f2)
         if (m?.status === 'Completed' && m.winnerId)
-          return m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id
+          return (m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id) ?? null
         return null
       }
 
@@ -376,6 +376,31 @@ export default function TournamentDetailPage() {
     },
   })
 
+  const generateSwissMut = useMutation({
+    mutationFn: async (phaseId: string) => {
+      const phase = format!.phases.find(p => p.id === phaseId)! as any
+      const pool = buildSwissPool(tournament!.participants)
+      const standings = calculateGroupStandings(phase, [pool], tournamentMatches ?? [])[0]
+      const plan = planSwissNextRound(pool, phase, standings, tournamentMatches ?? [])
+      const creates = plan.pairs.map(([f1, f2]) => matchesApi.create(id!, { fighter1Id: f1, fighter2Id: f2 }))
+      // Bye (odd pool): no opponent — backend auto-completes as a win for the bye fighter.
+      if (plan.bye) creates.push(matchesApi.create(id!, { fighter1Id: plan.bye }))
+      const results = await Promise.all(creates)
+      return { roundNumber: plan.roundNumber, count: results.length, hasBye: !!plan.bye }
+    },
+    onSuccess: ({ roundNumber, count, hasBye }) => {
+      qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
+      qc.invalidateQueries({ queryKey: ['tournaments', id] })
+      alert(`Тур ${roundNumber}: создано встреч ${count}${hasBye ? ' (включая бай)' : ''}`)
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error
+        ? err.message
+        : ((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка генерации тура швейцарки')
+      alert(msg)
+    },
+  })
+
   const addRandomFightersMut = useMutation({
     mutationFn: async (count: number) => {
       const pool = [...available].sort(() => Math.random() - 0.5).slice(0, count)
@@ -439,6 +464,7 @@ export default function TournamentDetailPage() {
   const roundRobinPhases = format?.phases.filter(p => p.type === 'roundRobin') ?? []
   const sePhases = format?.phases.filter(p => p.type === 'singleElimination') ?? []
   const dePhases = format?.phases.filter(p => p.type === 'doubleElimination') ?? []
+  const swissPhases = format?.phases.filter(p => p.type === 'swiss') ?? []
 
   const registeredIds = new Set(tournament.participants.map(p => p.fighterId))
   const available = (allFighters ?? []).filter(f => !registeredIds.has(f.id))
@@ -515,6 +541,21 @@ export default function TournamentDetailPage() {
               title="Сгенерировать следующий раунд double elimination (UB и LB независимо)"
             >
               {generateDEMut.isPending ? '…' : `⚙ Сгенерировать DE плейофф: ${phase.name}`}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {swissPhases.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          {swissPhases.map(phase => (
+            <button
+              key={phase.id}
+              onClick={() => generateSwissMut.mutate(phase.id)}
+              disabled={generateSwissMut.isPending}
+              title="Сгенерировать пары следующего тура швейцарки по текущей таблице"
+            >
+              {generateSwissMut.isPending ? '…' : `⚙ Сгенерировать тур: ${phase.name}`}
             </button>
           ))}
         </div>

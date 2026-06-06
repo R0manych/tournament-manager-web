@@ -118,6 +118,169 @@ export function assignGroupsFromExplicitSeeding(
   return groups
 }
 
+// ── Swiss (simple, single pool) ─────────────────────────────────────────────
+// Builds one pool from all participants ordered by seed. Group-swiss (multiple
+// pools via `groups`) is deferred — the simple version uses a single pool.
+// Standings are computed by reusing calculateGroupStandings (swiss phases carry
+// both `pointsPerMatch` and `tieBreakers`).
+export function buildSwissPool(participants: TournamentParticipant[]): GroupAssignment {
+  const sorted = [...participants].sort((a, b) => (a.seed ?? 999) - (b.seed ?? 999))
+  return {
+    groupIndex: 0,
+    groupLabel: 'A',
+    participants: sorted.map((p, idx) => ({
+      fighterId: p.fighterId,
+      seed: p.seed ?? idx + 1,
+      name: `${p.firstName} ${p.lastName}`,
+    })),
+  }
+}
+
+// ── Swiss round pairing (simple, single pool, fixed rounds) ─────────────────
+// Plans the next swiss round: validates the pool is ready, then produces the
+// pairs (and, for an odd pool, the bye). Scope of the preliminary version:
+//   • single pool; odd pools get one bye per round (auto-win, see below);
+//   • fixed-rounds termination (`rounds`); `qualification` mode not handled here;
+//   • round 1 paired by `pairing.firstRound`; later rounds Monrad-style
+//     (sort by standing, pair adjacently) with rematch avoidance.
+// A bye is created as a match with no opponent (fighter2Id omitted) — the
+// backend auto-completes it as a win for the bye fighter (score 0:0).
+export type ByePolicy = 'lowestRank' | 'highestRank' | 'random'
+
+export interface SwissPairingPhase {
+  rounds?: number
+  qualification?: unknown
+  pairing?: {
+    firstRound?: 'fold' | 'adjacent' | 'random'
+    avoidRematch?: boolean
+    byePolicy?: ByePolicy
+  }
+}
+
+export interface SwissRoundPlan {
+  roundNumber: number          // 1-based round about to be generated
+  pairs: [string, string][]
+  bye: string | null           // fighter granted a bye this round (odd pool), else null
+}
+
+function pairKey(a: string, b: string): string {
+  return a < b ? `${a}|${b}` : `${b}|${a}`
+}
+
+// Greedy backtracking pairing over an ordered list, optionally avoiding rematches.
+function backtrackPairs(order: string[], played: Set<string>, avoidRematch: boolean): [string, string][] | null {
+  if (order.length === 0) return []
+  const [first, ...rest] = order
+  for (let i = 0; i < rest.length; i++) {
+    const opp = rest[i]
+    if (avoidRematch && played.has(pairKey(first, opp))) continue
+    const sub = backtrackPairs(rest.filter((_, j) => j !== i), played, avoidRematch)
+    if (sub) return [[first, opp], ...sub]
+  }
+  return null
+}
+
+// First-round pairing over a (seed-ordered, even-length) list.
+function firstRoundPairs(order: string[], policy: 'fold' | 'adjacent' | 'random'): [string, string][] {
+  const pairs: [string, string][] = []
+  if (policy === 'fold') {
+    const half = order.length / 2
+    for (let i = 0; i < half; i++) pairs.push([order[i], order[i + half]])
+  } else if (policy === 'random') {
+    const shuffled = [...order]
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
+    }
+    for (let i = 0; i + 1 < shuffled.length; i += 2) pairs.push([shuffled[i], shuffled[i + 1]])
+  } else { // adjacent
+    for (let i = 0; i + 1 < order.length; i += 2) pairs.push([order[i], order[i + 1]])
+  }
+  return pairs
+}
+
+// Picks the bye recipient from a standings/seed-ordered list, preferring fighters
+// who have not had a bye yet.
+function pickBye(order: string[], hadBye: Set<string>, policy: ByePolicy): string {
+  const eligible = order.filter(id => !hadBye.has(id))
+  const candidates = eligible.length > 0 ? eligible : order
+  if (policy === 'highestRank') return candidates[0]
+  if (policy === 'random') return candidates[Math.floor(Math.random() * candidates.length)]
+  return candidates[candidates.length - 1] // lowestRank (default)
+}
+
+const isByeMatch = (m: Match) => m.fighter2Id == null
+
+export function planSwissNextRound(
+  pool: GroupAssignment,
+  phase: SwissPairingPhase,
+  standings: GroupStanding[] | undefined,
+  allMatches: Match[],
+): SwissRoundPlan {
+  if (phase.qualification) {
+    throw new Error('Режим отсечки (qualification) пока не поддерживается — используйте фиксированное число туров (rounds).')
+  }
+
+  const ids = pool.participants.map(p => p.fighterId)
+  const n = ids.length
+  if (n < 2) throw new Error('В пуле меньше двух участников.')
+
+  const idSet = new Set(ids)
+  // Pool matches: both fighters in the pool, or a bye whose single fighter is.
+  const swissMatches = allMatches.filter(m =>
+    idSet.has(m.fighter1Id) && (isByeMatch(m) || idSet.has(m.fighter2Id!))
+  )
+  // A round is "incomplete" only while a real match still awaits a result.
+  // Byes are created already resolved (WalkoverWin) and never block.
+  const incomplete = swissMatches.filter(m => m.status === 'Scheduled' || m.status === 'InProgress').length
+  if (incomplete > 0) {
+    throw new Error(`В текущем туре ещё ${incomplete} незавершённых боёв. Завершите их, чтобы сформировать следующий тур.`)
+  }
+
+  // Rounds played = games each fighter has had (equal across the pool in a clean
+  // swiss; byes count as a game). Use the minimum to avoid over-advancing.
+  const games = new Map<string, number>(ids.map(x => [x, 0]))
+  for (const m of swissMatches) {
+    games.set(m.fighter1Id, (games.get(m.fighter1Id) ?? 0) + 1)
+    if (m.fighter2Id && idSet.has(m.fighter2Id)) games.set(m.fighter2Id, (games.get(m.fighter2Id) ?? 0) + 1)
+  }
+  const roundsPlayed = Math.min(...games.values())
+  if (phase.rounds != null && roundsPlayed >= phase.rounds) {
+    throw new Error('Все туры швейцарки уже сыграны.')
+  }
+
+  const played = new Set(
+    swissMatches.filter(m => !isByeMatch(m)).map(m => pairKey(m.fighter1Id, m.fighter2Id!))
+  )
+  const hadBye = new Set(swissMatches.filter(isByeMatch).map(m => m.fighter1Id))
+  const roundNumber = roundsPlayed + 1
+
+  // Round 1 ordered by seed; later rounds by current standings.
+  let order = roundsPlayed === 0
+    ? [...ids]
+    : (standings ? standings.map(s => s.fighterId) : [...ids])
+
+  // Odd pool → one fighter sits out with a bye.
+  let bye: string | null = null
+  if (order.length % 2 === 1) {
+    bye = pickBye(order, hadBye, phase.pairing?.byePolicy ?? 'lowestRank')
+    order = order.filter(x => x !== bye)
+  }
+
+  let pairs: [string, string][]
+  if (roundsPlayed === 0) {
+    pairs = firstRoundPairs(order, phase.pairing?.firstRound ?? 'fold')
+  } else {
+    const avoidRematch = phase.pairing?.avoidRematch ?? true
+    const resolved = backtrackPairs(order, played, avoidRematch)
+      // Fallback: if a rematch-free pairing is impossible, allow rematches.
+      ?? backtrackPairs(order, played, false)
+    if (!resolved) throw new Error('Не удалось составить пары для следующего тура.')
+    pairs = resolved
+  }
+  return { roundNumber, pairs, bye }
+}
+
 // ── Shared slot label formatter ────────────────────────────────────────────
 // Handles any phaseId.GroupLabel pattern (e.g. groups.A, groups1.A, groups2.B)
 export function formatSlotLabel(source: string, rank: number, isDropdown = false): BracketSlot {
@@ -337,8 +500,18 @@ export function calculateGroupStandings(
     }
 
     for (const match of allMatches) {
-      if (!ids.has(match.fighter1Id) || !ids.has(match.fighter2Id)) continue
+      // Bye / walkover (no opponent): a win for fighter1, score difference untouched.
+      if (match.fighter2Id == null) {
+        if (match.status !== 'WalkoverWin' && match.status !== 'Completed') continue
+        if (!ids.has(match.fighter1Id)) continue
+        const sb = map.get(match.fighter1Id)!
+        sb.points += ppm.win
+        sb.wins++
+        continue
+      }
+
       if (match.status !== 'Completed') continue
+      if (!ids.has(match.fighter1Id) || !ids.has(match.fighter2Id)) continue
 
       const s1 = map.get(match.fighter1Id)!
       const s2 = map.get(match.fighter2Id)!
@@ -422,7 +595,7 @@ export function resolveDERoundPairs(
   const matchLoser = (f1: string, f2: string): string | null => {
     const m = findMatch(f1, f2)
     if (m?.status === 'Completed' && m.winnerId)
-      return m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id
+      return (m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id) ?? null
     return null
   }
 

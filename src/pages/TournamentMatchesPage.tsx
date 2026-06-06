@@ -9,6 +9,7 @@ const STATUS_LABEL: Record<string, string> = {
   InProgress: 'В процессе',
   Completed: 'Завершена',
   Cancelled: 'Отменена',
+  WalkoverWin: 'Бай (тех. победа)',
 }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -16,13 +17,15 @@ const STATUS_COLOR: Record<string, string> = {
   InProgress: '#0077cc',
   Completed: '#080',
   Cancelled: '#aaa',
+  WalkoverWin: '#080',
 }
 
 function MatchRow({ match, participants }: { match: Match; participants: TournamentParticipant[] }) {
+  const isBye = match.fighter2Id == null
   const f1 = participants.find(p => p.fighterId === match.fighter1Id)
   const f2 = participants.find(p => p.fighterId === match.fighter2Id)
   const n1 = f1 ? `${f1.firstName} ${f1.lastName}` : match.fighter1Id.slice(0, 8)
-  const n2 = f2 ? `${f2.firstName} ${f2.lastName}` : match.fighter2Id.slice(0, 8)
+  const n2 = isBye ? '— (бай)' : (f2 ? `${f2.firstName} ${f2.lastName}` : (match.fighter2Id ?? '').slice(0, 8))
 
   return (
     <tr>
@@ -30,12 +33,14 @@ function MatchRow({ match, participants }: { match: Match; participants: Tournam
         <Link to={`/matches/${match.id}`}>{n1}</Link>
       </td>
       <td style={{ ...TD, textAlign: 'center', fontWeight: 700, fontSize: '1.05em' }}>
-        {match.status === 'Scheduled'
-          ? 'vs'
-          : `${match.score1} : ${match.score2}`}
+        {isBye
+          ? 'бай'
+          : match.status === 'Scheduled'
+            ? 'vs'
+            : `${match.score1} : ${match.score2}`}
       </td>
-      <td style={TD}>
-        <Link to={`/matches/${match.id}`}>{n2}</Link>
+      <td style={{ ...TD, color: isBye ? '#aaa' : undefined }}>
+        {isBye ? n2 : <Link to={`/matches/${match.id}`}>{n2}</Link>}
       </td>
       <td style={{ ...TD, color: STATUS_COLOR[match.status] ?? '#888', whiteSpace: 'nowrap' }}>
         {STATUS_LABEL[match.status] ?? match.status}
@@ -70,7 +75,7 @@ export default function TournamentMatchesPage() {
 
   const scheduled = matches?.filter(m => m.status === 'Scheduled') ?? []
   const inProgress = matches?.filter(m => m.status === 'InProgress') ?? []
-  const completed = matches?.filter(m => m.status === 'Completed') ?? []
+  const completed = matches?.filter(m => m.status === 'Completed' || m.status === 'WalkoverWin') ?? []
   const cancelled = matches?.filter(m => m.status === 'Cancelled') ?? []
 
   const groups: Array<{ label: string; items: Match[] }> = [

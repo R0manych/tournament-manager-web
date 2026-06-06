@@ -1,5 +1,5 @@
 export type TournamentStatus = 'Draft' | 'Active' | 'Completed' | 'Cancelled'
-export type MatchStatus = 'Scheduled' | 'InProgress' | 'Completed' | 'Cancelled'
+export type MatchStatus = 'Scheduled' | 'InProgress' | 'Completed' | 'Cancelled' | 'WalkoverWin'
 
 export interface Fighter {
   id: string
@@ -52,7 +52,7 @@ export interface Match {
   id: string
   tournamentId: string
   fighter1Id: string
-  fighter2Id: string
+  fighter2Id?: string  // null/absent = bye (auto-win for fighter1, no opponent)
   scheduledAt?: string
   status: MatchStatus
   score1: number
@@ -92,7 +92,7 @@ export interface TournamentFormat {
   phases: Array<{
     id: string
     name: string
-    type: 'roundRobin' | 'singleElimination' | 'doubleElimination'
+    type: 'roundRobin' | 'singleElimination' | 'doubleElimination' | 'swiss'
     [key: string]: unknown
   }>
 }
@@ -124,7 +124,7 @@ export type UpdateFighterRequest = CreateFighterRequest
 
 export interface CreateMatchRequest {
   fighter1Id: string
-  fighter2Id: string
+  fighter2Id?: string  // omit for a bye — backend auto-completes as a win for fighter1
   scheduledAt?: string
   roundDurationSeconds?: number
   maxDoubles?: number

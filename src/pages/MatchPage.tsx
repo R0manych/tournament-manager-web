@@ -197,7 +197,7 @@ export default function MatchPage() {
 
   const { data: f2 } = useQuery({
     queryKey: ['fighters', match?.fighter2Id],
-    queryFn: () => fightersApi.get(match!.fighter2Id),
+    queryFn: () => fightersApi.get(match!.fighter2Id!),
     enabled: !!match?.fighter2Id,
   })
 
@@ -263,14 +263,16 @@ export default function MatchPage() {
   if (isLoading) return <p>Загрузка...</p>
   if (!match) return <p>Встреча не найдена</p>
 
+  const isBye = match.fighter2Id == null
   const name1 = f1 ? `${f1.firstName} ${f1.lastName}` : '…'
-  const name2 = f2 ? `${f2.firstName} ${f2.lastName}` : '…'
+  const name2 = isBye ? 'БАЙ' : (f2 ? `${f2.firstName} ${f2.lastName}` : '…')
   const short1 = name1.split(' ')[0]
   const short2 = name2.split(' ')[0]
 
   const isScheduled = match.status === 'Scheduled'
   const isInProgress = match.status === 'InProgress'
   const isCompleted = match.status === 'Completed'
+  const isWalkover = match.status === 'WalkoverWin'
 
   const winnerName =
     match.winnerId === match.fighter1Id ? name1
@@ -352,6 +354,7 @@ export default function MatchPage() {
           {match.status === 'InProgress' && 'Идёт бой'}
           {match.status === 'Completed' && 'Завершён'}
           {match.status === 'Cancelled' && 'Отменён'}
+          {match.status === 'WalkoverWin' && 'Бай (тех. победа)'}
         </span>
         {match.scheduledAt && (
           <span style={{ fontSize: '0.85em', color: '#888' }}>
@@ -404,9 +407,9 @@ export default function MatchPage() {
       </div>
 
       {/* Winner */}
-      {isCompleted && (
+      {(isCompleted || isWalkover) && (
         <p style={{ textAlign: 'center', fontWeight: 700, fontSize: '1.2em', color: winnerName ? '#2e7d32' : '#555', margin: '8px 0' }}>
-          {winnerName ? `Победитель: ${winnerName}` : 'Ничья'}
+          {isWalkover ? `Победитель (бай): ${name1}` : winnerName ? `Победитель: ${winnerName}` : 'Ничья'}
         </p>
       )}
 
