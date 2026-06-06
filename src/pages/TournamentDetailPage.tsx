@@ -3,10 +3,15 @@ import { Link, useParams } from 'react-router-dom'
 import { useState, useEffect } from 'react'
 import { tournamentsApi } from '../api/tournaments'
 import { matchesApi } from '../api/matches'
+import { encountersApi } from '../api/encounters'
+import { teamsApi } from '../api/teams'
 import { fightersApi } from '../api/fighters'
 import type { TournamentStatus } from '../api/types'
+import { participantName, participantClub } from '../api/types'
 import TournamentFormatSection from '../components/TournamentFormatSection'
-import { assignGroups, buildSwissPool, calculateGroupStandings, planSwissNextRound, resolvePlayoffSlots } from '../components/bracket/bracketUtils'
+import TeamsSection from '../components/TeamsSection'
+import EncountersSection from '../components/EncountersSection'
+import { assignGroups, buildSwissPool, calculateGroupStandings, encountersToStandingsMatches, planSwissNextRound, resolvePlayoffSlots } from '../components/bracket/bracketUtils'
 
 const STATUS_LABELS: Record<TournamentStatus, string> = {
   Draft: 'Черновик',
@@ -20,6 +25,17 @@ const STATUS_TRANSITIONS: Record<TournamentStatus, { status: TournamentStatus; l
   Active:    [{ status: 'Completed', label: '✓ Завершить' }, { status: 'Cancelled', label: '✕ Отменить' }],
   Completed: [{ status: 'Active', label: '↩ Вернуть в активные' }],
   Cancelled: [{ status: 'Draft', label: '↩ Восстановить' }],
+}
+
+// ── Test-data pools (random teams/fighters) ────────────────────────────────
+const FIRST_NAMES = ['Иван', 'Пётр', 'Алексей', 'Дмитрий', 'Сергей', 'Андрей', 'Михаил', 'Николай', 'Олег', 'Роман', 'Павел', 'Юрий']
+const LAST_NAMES = ['Иванов', 'Петров', 'Смирнов', 'Кузнецов', 'Соколов', 'Попов', 'Лебедев', 'Козлов', 'Новиков', 'Морозов', 'Волков', 'Орлов']
+const CLUB_NAMES = ['Сокол', 'Дружина', 'Гвардия', 'Легион', 'Викинг', 'Барс', 'Витязь', 'Орден']
+const rnd = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
+
+const TEST_BTN: React.CSSProperties = {
+  fontSize: '0.8em', color: '#999', background: 'none',
+  border: '1px dashed #ccc', borderRadius: 4, padding: '3px 10px', cursor: 'pointer',
 }
 
 export default function TournamentDetailPage() {
@@ -49,6 +65,13 @@ export default function TournamentDetailPage() {
     queryKey: ['tournament-matches', id],
     queryFn: () => matchesApi.listByTournament(id!),
     enabled: !!id,
+  })
+
+  // Team group standings score from encounters; loaded only for team tournaments.
+  const { data: tournamentEncounters } = useQuery({
+    queryKey: ['encounters', id],
+    queryFn: () => encountersApi.listByTournament(id!),
+    enabled: !!id && tournament?.participantKind === 'Team',
   })
 
   const statusMut = useMutation({
@@ -81,17 +104,57 @@ export default function TournamentDetailPage() {
   })
 
   const generateMut = useMutation({
-    mutationFn: (phaseId: string) => {
+    mutationFn: async (phaseId: string) => {
       const phase = format!.phases.find(p => p.id === phaseId)!
       const groupAssignments = assignGroups(phase as any, tournament!.participants)
+
+      // Team tournaments play each pair as an Encounter (series of bouts), not a
+      // single flat match — generate one Encounter per in-group pair, idempotently.
+      if (tournament!.participantKind === 'Team') {
+        const pairKey = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`)
+        const existing = await encountersApi.listByTournament(id!)
+        const existingPairs = new Set(existing.map(e => pairKey(e.participant1Id, e.participant2Id)))
+
+        const toCreate: Array<[string, string]> = []
+        let skipped = 0
+        for (const group of groupAssignments) {
+          const teamIds = group.participants.map(p => p.fighterId)
+          for (let i = 0; i < teamIds.length; i++) {
+            for (let j = i + 1; j < teamIds.length; j++) {
+              if (existingPairs.has(pairKey(teamIds[i], teamIds[j]))) skipped++
+              else toCreate.push([teamIds[i], teamIds[j]])
+            }
+          }
+        }
+        // Sequential keeps creation order deterministic (by group, then seed).
+        // generate-bouts right after create so each new series is ready to judge.
+        // Bout generation needs full rosters (3 per team); tolerate failures so
+        // every pair still gets its Encounter — incomplete ones can generate later.
+        let boutsFailed = 0
+        for (const [p1, p2] of toCreate) {
+          const enc = await encountersApi.create(id!, { participant1Id: p1, participant2Id: p2 })
+          try {
+            await encountersApi.generateBouts(enc.id)
+          } catch {
+            boutsFailed++
+          }
+        }
+        return { created: toCreate.length, skipped, boutsFailed }
+      }
+
       const groups = groupAssignments.map(g => g.participants.map(p => p.fighterId))
       return matchesApi.generateRoundRobin(id!, phaseId, groups)
     },
     onSuccess: (result) => {
-      qc.invalidateQueries({ queryKey: ['matches', id] })
+      qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
+      qc.invalidateQueries({ queryKey: ['encounters', id] })
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
-      if (result.skipped > 0) {
-        alert(`Создано боёв: ${result.created}. Пропущено (уже существуют): ${result.skipped}.`)
+      const failed = 'boutsFailed' in result ? result.boutsFailed : 0
+      if (result.created > 0 || result.skipped > 0) {
+        alert(
+          `Создано: ${result.created}. Пропущено (уже существуют): ${result.skipped}.` +
+          (failed > 0 ? `\nБои не сгенерированы для ${failed} встреч (укомплектуйте составы и сгенерируйте на странице встречи).` : '')
+        )
       }
     },
     onError: (err: unknown) => {
@@ -194,6 +257,105 @@ export default function TournamentDetailPage() {
       qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
       alert(`Создано встреч: ${results.length}`)
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error
+        ? err.message
+        : ((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка генерации плейофф')
+      alert(msg)
+    },
+  })
+
+  // Team single-elimination playoff: mirrors generatePlayoffMut but resolves
+  // standings from Encounters and creates Encounters (+ bouts) per pair, advancing
+  // by winnerParticipantId. Generates the next not-yet-created round on each click.
+  const generateTeamPlayoffMut = useMutation({
+    mutationFn: async (phaseId: string) => {
+      const sePhase = format!.phases.find(p => p.id === phaseId)!
+      const p = sePhase as any
+      const fromPhaseId: string = p.seeding?.from
+      const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)!
+      const groupAssignments = assignGroups(rrPhase as any, tournament!.participants)
+
+      const encs = await encountersApi.listByTournament(id!)
+      const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, encountersToStandingsMatches(encs))
+      const slots = resolvePlayoffSlots(sePhase, groupStandings)
+
+      if (slots.some(s => s === null)) {
+        throw new Error('Не удалось определить всех участников плейофф. Убедитесь, что все встречи группового этапа завершены.')
+      }
+
+      const findEnc = (a: string, b: string) =>
+        encs.find(e =>
+          (e.participant1Id === a && e.participant2Id === b) ||
+          (e.participant1Id === b && e.participant2Id === a))
+
+      const loserOf = (e?: ReturnType<typeof findEnc>) => {
+        if (!e?.winnerParticipantId) return null
+        return e.participant1Id === e.winnerParticipantId ? e.participant2Id : e.participant1Id
+      }
+
+      const has3rdPlace: boolean = !!p.thirdPlaceMatch
+      let currentSlots = slots as string[]
+      let prevPairEncs: ReturnType<typeof findEnc>[] = []
+
+      while (currentSlots.length >= 2) {
+        const pairs: [string, string][] = []
+        for (let i = 0; i + 1 < currentSlots.length; i += 2) pairs.push([currentSlots[i], currentSlots[i + 1]])
+
+        const isFinalRound = currentSlots.length === 2
+        const pairEncs = pairs.map(([a, b]) => findEnc(a, b))
+
+        const creates: Array<[string, string]> = []
+        for (let i = 0; i < pairs.length; i++) if (!pairEncs[i]) creates.push(pairs[i])
+
+        // 3rd-place encounter: alongside the final, from the two semi-final losers.
+        if (isFinalRound && has3rdPlace && prevPairEncs.length >= 2) {
+          const l1 = loserOf(prevPairEncs[0]), l2 = loserOf(prevPairEncs[1])
+          if (l1 && l2 && !findEnc(l1, l2)) creates.push([l1, l2])
+        }
+
+        if (creates.length > 0) {
+          const created = await Promise.all(
+            creates.map(([a, b]) => encountersApi.create(id!, { participant1Id: a, participant2Id: b }))
+          )
+          for (const enc of created) {
+            try { await encountersApi.generateBouts(enc.id) } catch { /* incomplete roster — generate later */ }
+          }
+          return created.length
+        }
+
+        const incomplete = pairEncs.filter(e => e && e.status !== 'Completed').length
+        if (incomplete > 0) {
+          throw new Error(`В текущем раунде плейофф ещё ${incomplete} незавершённых встреч. Завершите их, чтобы сформировать следующий раунд.`)
+        }
+
+        if (isFinalRound) {
+          if (has3rdPlace && prevPairEncs.length >= 2) {
+            const l1 = loserOf(prevPairEncs[0]), l2 = loserOf(prevPairEncs[1])
+            if (l1 && l2) {
+              const third = findEnc(l1, l2)
+              if (third && third.status !== 'Completed') throw new Error('Финал завершён, но матч за 3-е место ещё не сыгран.')
+            }
+          }
+          throw new Error('Плейофф уже полностью сыгран.')
+        }
+
+        const winners = pairEncs.map(e => e!.winnerParticipantId)
+        if (winners.some(w => !w)) {
+          throw new Error('Некоторые встречи завершены без победителя (ничья — нужен tie-break). Проверьте результаты.')
+        }
+        prevPairEncs = pairEncs
+        currentSlots = winners as string[]
+      }
+
+      throw new Error('Плейофф уже полностью сыгран.')
+    },
+    onSuccess: (count) => {
+      qc.invalidateQueries({ queryKey: ['encounters', id] })
+      qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
+      qc.invalidateQueries({ queryKey: ['tournaments', id] })
+      alert(`Создано встреч плейофф: ${count}`)
     },
     onError: (err: unknown) => {
       const msg = err instanceof Error
@@ -456,9 +618,82 @@ export default function TournamentDetailPage() {
     },
   })
 
+  // Test data: create N teams, each created+registered with a full 3-fighter roster.
+  const addRandomTeamsMut = useMutation({
+    mutationFn: async (count: number) => {
+      const base = tournament!.participants.length
+      for (let i = 0; i < count; i++) {
+        const no = base + i + 1
+        const team = await teamsApi.create(id!, { name: `${rnd(CLUB_NAMES)}-${no}`, club: rnd(CLUB_NAMES) })
+        await tournamentsApi.addParticipant(id!, team.id, no)
+        for (let pos = 1; pos <= 3; pos++) {
+          const f = await fightersApi.create({ firstName: rnd(FIRST_NAMES), lastName: rnd(LAST_NAMES) })
+          await teamsApi.addMember(team.id, { fighterId: f.id, position: pos })
+        }
+      }
+      return count
+    },
+    onSuccess: (count) => {
+      qc.invalidateQueries({ queryKey: ['teams', id] })
+      qc.invalidateQueries({ queryKey: ['tournaments', id] })
+      alert(`Добавлено команд: ${count}`)
+    },
+    onError: (err: unknown) =>
+      alert((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка добавления команд'),
+  })
+
+  // Test data: play out every unfinished encounter — generate bouts if missing,
+  // start it, fill each bout with a random decisive score, then complete it.
+  const randomTeamResultsMut = useMutation({
+    mutationFn: async () => {
+      const encs = await encountersApi.listByTournament(id!)
+      const pending = encs.filter(e => e.status !== 'Completed' && e.status !== 'Cancelled')
+      if (pending.length === 0) throw new Error('Нет незавершённых встреч')
+
+      let tieBreaks = 0
+      for (const enc of pending) {
+        if (enc.bouts.length === 0) await encountersApi.generateBouts(enc.id)
+        if (enc.status === 'Scheduled') await encountersApi.setStatus(enc.id, 'InProgress')
+
+        // Re-fetch so bout list/statuses are current regardless of which
+        // mutation response repopulates `bouts`.
+        const fresh = await encountersApi.get(enc.id)
+        for (const b of fresh.bouts) {
+          if (b.status === 'Completed' || b.status === 'WalkoverWin') continue
+          if (b.fighter2Id == null) continue // bye — auto-resolved
+          await matchesApi.setStatus(b.id, 'InProgress')
+          const p1 = Math.floor(Math.random() * 3) + 1
+          const p2 = (p1 % 3) + 1 // different from p1 → guarantees a bout winner
+          await matchesApi.addExchange(b.id, { roundNumber: 1, points1: p1, points2: p2, isDoubleHit: false })
+          await matchesApi.setStatus(b.id, 'Completed')
+        }
+        try {
+          await encountersApi.setStatus(enc.id, 'Completed')
+        } catch {
+          // Aggregate tie → needs a manual tie-break; leave the encounter open.
+          tieBreaks++
+        }
+      }
+      return { count: pending.length, tieBreaks }
+    },
+    onSuccess: ({ count, tieBreaks }) => {
+      qc.invalidateQueries({ queryKey: ['encounters', id] })
+      qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
+      qc.invalidateQueries({ queryKey: ['tournaments', id] })
+      alert(`Заполнено встреч: ${count}.` + (tieBreaks > 0 ? `\nНичья (нужен tie-break) в ${tieBreaks} — заверши вручную.` : ''))
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error
+        ? err.message
+        : ((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка')
+      alert(msg)
+    },
+  })
+
   if (isLoading) return <p>Загрузка...</p>
   if (!tournament) return <p>Турнир не найден</p>
 
+  const isTeam = tournament.participantKind === 'Team'
   const hasMatches = (tournament.matchesCount ?? 0) > 0
   const transitions = STATUS_TRANSITIONS[tournament.status]
   const roundRobinPhases = format?.phases.filter(p => p.type === 'roundRobin') ?? []
@@ -466,7 +701,7 @@ export default function TournamentDetailPage() {
   const dePhases = format?.phases.filter(p => p.type === 'doubleElimination') ?? []
   const swissPhases = format?.phases.filter(p => p.type === 'swiss') ?? []
 
-  const registeredIds = new Set(tournament.participants.map(p => p.fighterId))
+  const registeredIds = new Set(tournament.participants.map(p => p.participantId))
   const available = (allFighters ?? []).filter(f => !registeredIds.has(f.id))
 
   return (
@@ -497,6 +732,7 @@ export default function TournamentDetailPage() {
         participants={tournament.participants}
         defaultFightDurationSeconds={tournament.defaultRoundDurationSeconds}
         allMatches={tournamentMatches}
+        encounters={tournamentEncounters}
       />
 
       <h2>Встречи {tournament.matchesCount > 0 && `(${tournament.matchesCount})`}</h2>
@@ -508,15 +744,17 @@ export default function TournamentDetailPage() {
               key={phase.id}
               onClick={() => generateMut.mutate(phase.id)}
               disabled={generateMut.isPending}
-              title="Сгенерировать все бои по системе каждый-с-каждым в группах этой фазы"
+              title={isTeam
+                ? 'Создать командные встречи (серии боёв) по системе каждый-с-каждым в группах этой фазы'
+                : 'Сгенерировать все бои по системе каждый-с-каждым в группах этой фазы'}
             >
-              {generateMut.isPending ? '…' : `⚙ Сгенерировать бои: ${phase.name}`}
+              {generateMut.isPending ? '…' : `⚙ Сгенерировать ${isTeam ? 'встречи' : 'бои'}: ${phase.name}`}
             </button>
           ))}
         </div>
       )}
 
-      {sePhases.length > 0 && (
+      {!isTeam && sePhases.length > 0 && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
           {sePhases.map(phase => (
             <button
@@ -531,7 +769,22 @@ export default function TournamentDetailPage() {
         </div>
       )}
 
-      {dePhases.length > 0 && (
+      {isTeam && sePhases.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          {sePhases.map(phase => (
+            <button
+              key={phase.id}
+              onClick={() => generateTeamPlayoffMut.mutate(phase.id)}
+              disabled={generateTeamPlayoffMut.isPending}
+              title="Сгенерировать командные встречи текущего раунда плейофф по итогам предыдущего"
+            >
+              {generateTeamPlayoffMut.isPending ? '…' : `⚙ Сгенерировать плейофф: ${phase.name}`}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!isTeam && dePhases.length > 0 && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
           {dePhases.map(phase => (
             <button
@@ -546,7 +799,7 @@ export default function TournamentDetailPage() {
         </div>
       )}
 
-      {swissPhases.length > 0 && (
+      {!isTeam && swissPhases.length > 0 && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
           {swissPhases.map(phase => (
             <button
@@ -563,89 +816,122 @@ export default function TournamentDetailPage() {
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
         <Link to={`/tournaments/${id}/matches`}>Смотреть все встречи →</Link>
-        <button
-          onClick={() => randomResultsMut.mutate()}
-          disabled={randomResultsMut.isPending}
-          title="Тестовая функция: проставить случайные результаты всем незавершённым боям"
-          style={{ fontSize: '0.8em', color: '#999', background: 'none', border: '1px dashed #ccc', borderRadius: 4, padding: '3px 10px', cursor: 'pointer' }}
-        >
-          {randomResultsMut.isPending ? '…' : '🎲 Случайные результаты (тест)'}
-        </button>
+        {!isTeam && (
+          <button
+            onClick={() => randomResultsMut.mutate()}
+            disabled={randomResultsMut.isPending}
+            title="Тестовая функция: проставить случайные результаты всем незавершённым боям"
+            style={{ fontSize: '0.8em', color: '#999', background: 'none', border: '1px dashed #ccc', borderRadius: 4, padding: '3px 10px', cursor: 'pointer' }}
+          >
+            {randomResultsMut.isPending ? '…' : '🎲 Случайные результаты (тест)'}
+          </button>
+        )}
       </div>
 
-      <h2>
-        Участники ({tournament.participants.length})
-        <span style={{ marginLeft: 12, display: 'inline-flex', gap: 6 }}>
-          {[8, 16, 32, 64].map(n => (
-            <button
-              key={n}
-              onClick={() => addRandomFightersMut.mutate(n)}
-              disabled={addRandomFightersMut.isPending}
-              title={`Тестовая функция: создать и добавить ${n} случайных бойцов`}
-              style={{ fontSize: '0.8em', color: '#999', background: 'none', border: '1px dashed #ccc', borderRadius: 4, padding: '3px 10px', cursor: 'pointer' }}
-            >
-              {addRandomFightersMut.isPending ? '…' : `+${n} бойцов (тест)`}
-            </button>
-          ))}
-        </span>
-      </h2>
-
-      {tournament.participants.length === 0 ? (
-        <p style={{ color: '#888' }}>Участников нет</p>
-      ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
-          {tournament.participants.map(p => (
-            <li key={p.fighterId} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-              <span>
-                {p.firstName} {p.lastName}
-                {p.seed != null && <span style={{ color: '#888', marginLeft: 6 }}>#{p.seed}</span>}
-                {p.club && <span style={{ color: '#888', marginLeft: 6 }}>({p.club})</span>}
-              </span>
+      {isTeam ? (
+        <>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', margin: '8px 0' }}>
+            <span style={{ color: '#999', fontSize: '0.8em' }}>Тест:</span>
+            {[4, 8, 16].map(n => (
               <button
-                onClick={() => removeParticipantMut.mutate(p.fighterId)}
-                disabled={removeParticipantMut.isPending}
-                style={{ color: '#c00', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.85em' }}
-                title="Снять с турнира"
+                key={n}
+                onClick={() => addRandomTeamsMut.mutate(n)}
+                disabled={addRandomTeamsMut.isPending}
+                title={`Создать и зарегистрировать ${n} случайных команд с полными составами`}
+                style={TEST_BTN}
               >
-                Снять
+                {addRandomTeamsMut.isPending ? '…' : `+${n} команд`}
               </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {available.length > 0 && (
-        <form
-          onSubmit={e => { e.preventDefault(); if (selectedFighterId) addParticipantMut.mutate() }}
-          style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}
-        >
-          <select
-            value={selectedFighterId}
-            onChange={e => setSelectedFighterId(e.target.value)}
-            required
-            style={{ minWidth: 200 }}
-          >
-            <option value="">— выбрать бойца —</option>
-            {available.map(f => (
-              <option key={f.id} value={f.id}>
-                {f.firstName} {f.lastName}{f.club ? ` (${f.club})` : ''}
-              </option>
             ))}
-          </select>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            Посев
-            <input
-              type="number" min={1} value={seed}
-              onChange={e => setSeed(e.target.value)}
-              placeholder="—"
-              style={{ width: 52 }}
-            />
-          </label>
-          <button type="submit" disabled={!selectedFighterId || addParticipantMut.isPending}>
-            + Добавить
-          </button>
-          {addParticipantMut.isError && <span style={{ color: '#c00' }}>Ошибка</span>}
-        </form>
+            <button
+              onClick={() => randomTeamResultsMut.mutate()}
+              disabled={randomTeamResultsMut.isPending}
+              title="Проставить случайные результаты всем незавершённым командным встречам"
+              style={TEST_BTN}
+            >
+              {randomTeamResultsMut.isPending ? '…' : '🎲 Случайные результаты'}
+            </button>
+          </div>
+          <TeamsSection tournamentId={id!} participants={tournament.participants} />
+          <EncountersSection tournamentId={id!} participants={tournament.participants} />
+        </>
+      ) : (
+        <>
+          <h2>
+            Участники ({tournament.participants.length})
+            <span style={{ marginLeft: 12, display: 'inline-flex', gap: 6 }}>
+              {[8, 16, 32, 64].map(n => (
+                <button
+                  key={n}
+                  onClick={() => addRandomFightersMut.mutate(n)}
+                  disabled={addRandomFightersMut.isPending}
+                  title={`Тестовая функция: создать и добавить ${n} случайных бойцов`}
+                  style={{ fontSize: '0.8em', color: '#999', background: 'none', border: '1px dashed #ccc', borderRadius: 4, padding: '3px 10px', cursor: 'pointer' }}
+                >
+                  {addRandomFightersMut.isPending ? '…' : `+${n} бойцов (тест)`}
+                </button>
+              ))}
+            </span>
+          </h2>
+
+          {tournament.participants.length === 0 ? (
+            <p style={{ color: '#888' }}>Участников нет</p>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+              {tournament.participants.map(p => (
+                <li key={p.participantId} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span>
+                    {participantName(p)}
+                    {p.seed != null && <span style={{ color: '#888', marginLeft: 6 }}>#{p.seed}</span>}
+                    {participantClub(p) && <span style={{ color: '#888', marginLeft: 6 }}>({participantClub(p)})</span>}
+                  </span>
+                  <button
+                    onClick={() => removeParticipantMut.mutate(p.participantId)}
+                    disabled={removeParticipantMut.isPending}
+                    style={{ color: '#c00', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.85em' }}
+                    title="Снять с турнира"
+                  >
+                    Снять
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {available.length > 0 && (
+            <form
+              onSubmit={e => { e.preventDefault(); if (selectedFighterId) addParticipantMut.mutate() }}
+              style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}
+            >
+              <select
+                value={selectedFighterId}
+                onChange={e => setSelectedFighterId(e.target.value)}
+                required
+                style={{ minWidth: 200 }}
+              >
+                <option value="">— выбрать бойца —</option>
+                {available.map(f => (
+                  <option key={f.id} value={f.id}>
+                    {f.firstName} {f.lastName}{f.club ? ` (${f.club})` : ''}
+                  </option>
+                ))}
+              </select>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                Посев
+                <input
+                  type="number" min={1} value={seed}
+                  onChange={e => setSeed(e.target.value)}
+                  placeholder="—"
+                  style={{ width: 52 }}
+                />
+              </label>
+              <button type="submit" disabled={!selectedFighterId || addParticipantMut.isPending}>
+                + Добавить
+              </button>
+              {addParticipantMut.isError && <span style={{ color: '#c00' }}>Ошибка</span>}
+            </form>
+          )}
+        </>
       )}
     </div>
   )

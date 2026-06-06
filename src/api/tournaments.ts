@@ -9,10 +9,10 @@ export const tournamentsApi = {
   delete: (id: string) => api.delete(`/tournaments/${id}`),
   setStatus: (id: string, status: TournamentStatus) =>
     api.patch<Tournament>(`/tournaments/${id}/status`, { status }),
-  addParticipant: (id: string, fighterId: string, seed?: number) =>
-    api.post(`/tournaments/${id}/participants`, { fighterId, seed }),
-  removeParticipant: (id: string, fighterId: string) =>
-    api.delete(`/tournaments/${id}/participants/${fighterId}`),
+  addParticipant: (id: string, participantId: string, seed?: number) =>
+    api.post(`/tournaments/${id}/participants`, { participantId, seed }),
+  removeParticipant: (id: string, participantId: string) =>
+    api.delete(`/tournaments/${id}/participants/${participantId}`),
 
   format: {
     get: (id: string) => api.get<TournamentFormat>(`/tournaments/${id}/format`),

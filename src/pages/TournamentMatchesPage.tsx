@@ -2,7 +2,9 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { tournamentsApi } from '../api/tournaments'
 import { matchesApi } from '../api/matches'
+import EncountersSection from '../components/EncountersSection'
 import type { Match, TournamentParticipant } from '../api/types'
+import { participantName } from '../api/types'
 
 const STATUS_LABEL: Record<string, string> = {
   Scheduled: 'Запланирована',
@@ -22,10 +24,10 @@ const STATUS_COLOR: Record<string, string> = {
 
 function MatchRow({ match, participants }: { match: Match; participants: TournamentParticipant[] }) {
   const isBye = match.fighter2Id == null
-  const f1 = participants.find(p => p.fighterId === match.fighter1Id)
-  const f2 = participants.find(p => p.fighterId === match.fighter2Id)
-  const n1 = f1 ? `${f1.firstName} ${f1.lastName}` : match.fighter1Id.slice(0, 8)
-  const n2 = isBye ? '— (бай)' : (f2 ? `${f2.firstName} ${f2.lastName}` : (match.fighter2Id ?? '').slice(0, 8))
+  const f1 = participants.find(p => p.participantId === match.fighter1Id)
+  const f2 = participants.find(p => p.participantId === match.fighter2Id)
+  const n1 = f1 ? participantName(f1) : match.fighter1Id.slice(0, 8)
+  const n2 = isBye ? '— (бай)' : (f2 ? participantName(f2) : (match.fighter2Id ?? '').slice(0, 8))
 
   return (
     <tr>
@@ -64,14 +66,33 @@ export default function TournamentMatchesPage() {
     enabled: !!id,
   })
 
+  const isTeam = tournament?.participantKind === 'Team'
+
   const { data: matches, isLoading: mLoading } = useQuery({
     queryKey: ['matches', id],
     queryFn: () => matchesApi.listByTournament(id!),
-    enabled: !!id,
+    // Team tournaments are navigated as encounters (team windows), not flat bouts.
+    enabled: !!id && tournament != null && !isTeam,
   })
 
-  if (tLoading || mLoading) return <p>Загрузка...</p>
+  if (tLoading) return <p>Загрузка...</p>
   if (!tournament) return <p>Турнир не найден</p>
+
+  // Team tournament: list the team encounters; each opens the team-encounter window
+  // (/encounters/:id) which in turn drills into per-pair bout windows (/matches/:id).
+  if (isTeam) {
+    return (
+      <div style={{ maxWidth: 860, margin: '0 auto', padding: '0 16px' }}>
+        <p style={{ margin: '12px 0 4px', color: '#888', fontSize: '0.9em' }}>
+          <Link to={`/tournaments/${id}`}>← {tournament.name}</Link>
+        </p>
+        <h1 style={{ margin: '4px 0 20px' }}>Встречи</h1>
+        <EncountersSection tournamentId={id!} participants={tournament.participants} />
+      </div>
+    )
+  }
+
+  if (mLoading) return <p>Загрузка...</p>
 
   const scheduled = matches?.filter(m => m.status === 'Scheduled') ?? []
   const inProgress = matches?.filter(m => m.status === 'InProgress') ?? []

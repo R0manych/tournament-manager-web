@@ -1,7 +1,8 @@
-import type { Match, TournamentFormat, TournamentParticipant } from '../../api/types'
+import type { Encounter, Match, TournamentFormat, TournamentParticipant } from '../../api/types'
 import {
   assignGroups, assignGroupsFromExplicitSeeding, buildSwissPool,
-  buildBracketRounds, calculateGroupStandings, resolvePlayoffSlots, resolveDERoundPairs,
+  buildBracketRounds, calculateGroupStandings, encountersToStandingsMatches,
+  resolvePlayoffSlots, resolveDERoundPairs,
   type PhaseStandingsCache,
 } from './bracketUtils'
 import type { DEPhase } from './bracketUtils'
@@ -15,10 +16,16 @@ interface Props {
   participants: TournamentParticipant[]
   fightDurationSeconds?: number
   allMatches?: Match[]
+  encounters?: Encounter[]
 }
 
-export default function TournamentBracketView({ format, participants, fightDurationSeconds, allMatches }: Props) {
+export default function TournamentBracketView({ format, participants, fightDurationSeconds, allMatches, encounters }: Props) {
   const displayDuration = fightDurationSeconds ?? format.defaults?.roundDurationSeconds
+
+  // Team group stages score from Encounters (aggregate per pair), singles from
+  // flat Matches. Map encounters onto the shared StandingsMatch shape.
+  const isTeam = participants[0]?.kind === 'Team'
+  const standingsSource = isTeam ? encountersToStandingsMatches(encounters ?? []) : allMatches
 
   // Build standings cache for all roundRobin phases in declaration order so that
   // explicit-seeded phases (seeding.groups) can resolve participants from earlier phases.
@@ -29,8 +36,8 @@ export default function TournamentBracketView({ format, participants, fightDurat
     const assignments = p.seeding?.groups
       ? assignGroupsFromExplicitSeeding(phase as any, standingsCache)
       : assignGroups(phase as any, participants)
-    const standings = allMatches
-      ? calculateGroupStandings(phase, assignments, allMatches)
+    const standings = standingsSource
+      ? calculateGroupStandings(phase, assignments, standingsSource)
       : assignments.map(() => [])
     standingsCache.set(phase.id, { assignments, standings })
   }
@@ -49,7 +56,7 @@ export default function TournamentBracketView({ format, participants, fightDurat
           const cached = standingsCache.get(phase.id)!
 
           let groups = cached.assignments
-          let phaseStandings = allMatches ? cached.standings : undefined
+          let phaseStandings = standingsSource ? cached.standings : undefined
 
           if (p.seeding?.groups) {
             // Only show participants once the source phase has completed matches.
@@ -61,8 +68,8 @@ export default function TournamentBracketView({ format, participants, fightDurat
             const sourceIds = sourceCached
               ? new Set(sourceCached.assignments.flatMap(g => g.participants.map(px => px.fighterId)))
               : new Set<string>()
-            const sourceHasCompleted = allMatches
-              ? allMatches.some(m => m.status === 'Completed' && sourceIds.has(m.fighter1Id) && m.fighter2Id != null && sourceIds.has(m.fighter2Id))
+            const sourceHasCompleted = standingsSource
+              ? standingsSource.some(m => m.status === 'Completed' && sourceIds.has(m.fighter1Id) && m.fighter2Id != null && sourceIds.has(m.fighter2Id))
               : false
 
             if (!sourceHasCompleted) {
@@ -85,7 +92,7 @@ export default function TournamentBracketView({ format, participants, fightDurat
         if (phase.type === 'singleElimination') {
           const p = phase as any
           let resolvedIds: (string | null)[] | undefined
-          if (allMatches && p.seeding?.from) {
+          if (standingsSource && p.seeding?.from) {
             const cached = standingsCache.get(p.seeding.from as string)
             if (cached) {
               const candidateIds = resolvePlayoffSlots(phase as any, cached.standings)
@@ -93,7 +100,7 @@ export default function TournamentBracketView({ format, participants, fightDurat
                 if (i % 2 !== 0) return false
                 const f1 = id, f2 = candidateIds[i + 1]
                 if (!f1 || !f2) return false
-                return allMatches.some(m =>
+                return standingsSource.some(m =>
                   (m.fighter1Id === f1 && m.fighter2Id === f2) ||
                   (m.fighter1Id === f2 && m.fighter2Id === f1)
                 )
@@ -101,7 +108,7 @@ export default function TournamentBracketView({ format, participants, fightDurat
               if (hasPlayoffMatches) resolvedIds = candidateIds
             }
           }
-          const rounds = buildBracketRounds(phase as any, resolvedIds, participants, allMatches)
+          const rounds = buildBracketRounds(phase as any, resolvedIds, participants, standingsSource)
           return (
             <SingleEliminationView
               key={phase.id}

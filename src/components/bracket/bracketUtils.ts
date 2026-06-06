@@ -1,5 +1,9 @@
-import type { TournamentFormat, TournamentParticipant, Match } from '../../api/types'
+import type { TournamentFormat, TournamentParticipant, Match, Encounter } from '../../api/types'
+import { participantName } from '../../api/types'
 
+// NOTE: `fighterId` here is an opaque participant id — a Fighter.Id in singles
+// tournaments and a Team.Id in team tournaments. The name is kept for minimal
+// churn; bracket logic treats it as an interchangeable slot identifier.
 export interface GroupAssignment {
   groupIndex: number
   groupLabel: string
@@ -54,13 +58,56 @@ export function assignGroups(
     const row = Math.floor(idx / groupCount)
     const col = row % 2 === 0 ? idx % groupCount : groupCount - 1 - (idx % groupCount)
     groups[col].participants.push({
-      fighterId: p.fighterId,
+      fighterId: p.participantId,
       seed: p.seed ?? idx + 1,
-      name: `${p.firstName} ${p.lastName}`,
+      name: participantName(p),
     })
   })
 
   return groups
+}
+
+// ── Team encounters → round-robin groups ────────────────────────────────────
+export interface EncounterGroup {
+  label: string | null   // group label (e.g. 'A'); null = ungrouped / cross-group bucket
+  encounters: Encounter[]
+}
+
+// Buckets team encounters into their round-robin group (both teams in the same
+// group) and orders each bucket by the canonical pair sequence — (0,1),(0,2),…,
+// (1,2),… over the group's seed order — so the list reads in schedule order
+// instead of arbitrary creation order. Encounters whose two teams aren't in the
+// same group fall into a trailing `label: null` bucket.
+export function groupEncountersByGroup(
+  groups: GroupAssignment[],
+  encounters: Encounter[],
+): EncounterGroup[] {
+  const groupIdxOf = new Map<string, number>()
+  groups.forEach((g, gi) => g.participants.forEach(p => groupIdxOf.set(p.fighterId, gi)))
+
+  const orderInGroup = (gi: number, e: Encounter): number => {
+    const ids = groups[gi].participants.map(p => p.fighterId)
+    const i1 = ids.indexOf(e.participant1Id)
+    const i2 = ids.indexOf(e.participant2Id)
+    const a = Math.min(i1, i2), b = Math.max(i1, i2)
+    let idx = 0
+    for (let k = 0; k < a; k++) idx += ids.length - 1 - k
+    return idx + (b - a - 1)
+  }
+
+  const buckets: Encounter[][] = groups.map(() => [])
+  const other: Encounter[] = []
+  for (const e of encounters) {
+    const g1 = groupIdxOf.get(e.participant1Id)
+    const g2 = groupIdxOf.get(e.participant2Id)
+    if (g1 != null && g1 === g2) buckets[g1].push(e)
+    else other.push(e)
+  }
+  buckets.forEach((arr, gi) => arr.sort((x, y) => orderInGroup(gi, x) - orderInGroup(gi, y)))
+
+  const result: EncounterGroup[] = groups.map((g, gi) => ({ label: g.groupLabel, encounters: buckets[gi] }))
+  if (other.length) result.push({ label: null, encounters: other })
+  return result
 }
 
 // ── Explicit group seeding (phase.seeding.groups is defined) ──────────────
@@ -129,9 +176,9 @@ export function buildSwissPool(participants: TournamentParticipant[]): GroupAssi
     groupIndex: 0,
     groupLabel: 'A',
     participants: sorted.map((p, idx) => ({
-      fighterId: p.fighterId,
+      fighterId: p.participantId,
       seed: p.seed ?? idx + 1,
-      name: `${p.firstName} ${p.lastName}`,
+      name: participantName(p),
     })),
   }
 }
@@ -311,7 +358,7 @@ export function buildBracketRounds(
   phase: TournamentFormat['phases'][0] & { type: 'singleElimination' },
   resolvedIds?: (string | null)[],
   participants?: TournamentParticipant[],
-  allMatches?: Match[],
+  allMatches?: StandingsMatch[],   // singles Matches or mapped team Encounters
 ): BracketRoundData[] {
   const p = phase as any
   const slots: Array<{ source: string; rank: number }> = p.seeding?.slots ?? []
@@ -320,8 +367,8 @@ export function buildBracketRounds(
 
   const getName = (fid: string | null): string | null => {
     if (!fid || !participants) return null
-    const pt = participants.find(x => x.fighterId === fid)
-    return pt ? `${pt.firstName} ${pt.lastName}` : null
+    const pt = participants.find(x => x.participantId === fid)
+    return pt ? participantName(pt) : null
   }
 
   const findMatch = (f1: string, f2: string) =>
@@ -434,8 +481,8 @@ export function buildUBRounds(
 
   const getName = (fid: string | null): string | null => {
     if (!fid || !participants) return null
-    const pt = participants.find(x => x.fighterId === fid)
-    return pt ? `${pt.firstName} ${pt.lastName}` : null
+    const pt = participants.find(x => x.participantId === fid)
+    return pt ? participantName(pt) : null
   }
 
   return rounds.map((round, ri) => {
@@ -483,10 +530,28 @@ export interface GroupStanding {
   losses: number
 }
 
+// Standings are computed from anything that looks like a head-to-head result:
+// singles Matches, or team Encounters mapped via `encountersToStandingsMatches`.
+export type StandingsMatch = Pick<Match, 'fighter1Id' | 'fighter2Id' | 'status' | 'score1' | 'score2' | 'winnerId'>
+
+// Maps team Encounters onto the StandingsMatch shape so the same round-robin
+// standings logic works for team group stages (team id ↔ participant id, the
+// encounter aggregate score ↔ match score, winnerParticipantId ↔ winnerId).
+export function encountersToStandingsMatches(encounters: Encounter[]): StandingsMatch[] {
+  return encounters.map(e => ({
+    fighter1Id: e.participant1Id,
+    fighter2Id: e.participant2Id,
+    status: e.status,
+    score1: e.score1,
+    score2: e.score2,
+    winnerId: e.winnerParticipantId,
+  }))
+}
+
 export function calculateGroupStandings(
   rrPhase: TournamentFormat['phases'][0],
   groupAssignments: GroupAssignment[],
-  allMatches: Match[],
+  allMatches: StandingsMatch[],
 ): GroupStanding[][] {
   const p = rrPhase as any
   const ppm = p.pointsPerMatch as { win: number; draw: number; loss: number }
@@ -679,8 +744,8 @@ export function buildLBRounds(
 
   const getName = (fid: string | null): string | null => {
     if (!fid || !participants) return null
-    const pt = participants.find(x => x.fighterId === fid)
-    return pt ? `${pt.firstName} ${pt.lastName}` : null
+    const pt = participants.find(x => x.participantId === fid)
+    return pt ? participantName(pt) : null
   }
 
   let currentWinners = slots.length

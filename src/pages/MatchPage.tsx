@@ -4,7 +4,9 @@ import { Link, useParams } from 'react-router-dom'
 import { fightersApi } from '../api/fighters'
 import { matchesApi } from '../api/matches'
 import { tournamentsApi } from '../api/tournaments'
+import { encountersApi } from '../api/encounters'
 import type { AddExchangeRequest, Exchange, MatchStatus } from '../api/types'
+import { participantShortName, participantName } from '../api/types'
 
 // ─── Fight Timer ──────────────────────────────────────────────────────────────
 
@@ -201,7 +203,22 @@ export default function MatchPage() {
     enabled: !!match?.fighter2Id,
   })
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['matches', id] })
+  // Team bout: load the parent encounter for series context (aggregate score, cap).
+  const { data: encounter } = useQuery({
+    queryKey: ['encounters', match?.encounterId],
+    queryFn: () => encountersApi.get(match!.encounterId!),
+    enabled: !!match?.encounterId,
+    refetchInterval: q => (q.state.data?.status === 'InProgress' ? 5000 : false),
+  })
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['matches', id] })
+    // A bout score change moves the encounter aggregate — refresh it too.
+    if (match?.encounterId) {
+      qc.invalidateQueries({ queryKey: ['encounters', match.encounterId] })
+      qc.invalidateQueries({ queryKey: ['tournament-matches', match.tournamentId] })
+    }
+  }
 
   const statusMut = useMutation({
     mutationFn: (s: MatchStatus) => matchesApi.setStatus(id!, s),
@@ -209,11 +226,16 @@ export default function MatchPage() {
       // Immediately put server response into cache — no wait for refetch.
       // This ensures FightTimer sees startedAt right away when going InProgress.
       qc.setQueryData(['matches', id], updated)
-      if (updated.status === 'InProgress' && updated.startedAt !== match?.startedAt) {
-        // Start in paused state so the referee can choose when to run the timer.
-        // pauseStartRef tracks how long the pause lasts so elapsed time stays correct.
+      if (updated.status === 'InProgress') {
+        // Re-arm the client-side timer on every (re)start — including reopening a
+        // completed bout via «Вернуть в бой». Fold all time already elapsed since
+        // the server `startedAt` into `pauseAcc`, so the countdown begins from full
+        // when the referee presses «Старт таймера». Without this, an old startedAt
+        // (unchanged by the server on reopen) makes the timer resume mid-way or
+        // already expired. For a fresh start startedAt ≈ now, so this is a no-op.
+        const startedMs = updated.startedAt ? new Date(updated.startedAt).getTime() : Date.now()
         setPaused(true)
-        setPauseAcc(0)
+        setPauseAcc(Math.max(0, (Date.now() - startedMs) / 1000))
         pauseStartRef.current = Date.now()
       }
       invalidate()
@@ -279,7 +301,26 @@ export default function MatchPage() {
     : match.winnerId === match.fighter2Id ? name2
     : null
 
-  const totalFightSeconds = tournament?.defaultRoundDurationSeconds ?? match.effectiveRoundDurationSeconds
+  // Team bout context
+  const isBout = match.encounterId != null
+  const isTieBreak = match.boutNumber === 10
+  // For bouts the effective duration is resolved by the backend with encounter
+  // priority; for singles the tournament default wins (see AI-context §8).
+  const totalFightSeconds = isBout
+    ? match.effectiveRoundDurationSeconds
+    : (tournament?.defaultRoundDurationSeconds ?? match.effectiveRoundDurationSeconds)
+
+  // Soft cap: encounter aggregate (which already includes this in-progress bout)
+  // reaching the bout's targetCumulativeScore signals the referee to end the bout.
+  const teamName1 = encounter ? tournament?.participants.find(p => p.participantId === encounter.participant1Id) : undefined
+  const teamName2 = encounter ? tournament?.participants.find(p => p.participantId === encounter.participant2Id) : undefined
+  const capReached =
+    isBout && !isTieBreak && match.targetCumulativeScore != null && encounter != null &&
+    (encounter.score1 >= match.targetCumulativeScore || encounter.score2 >= match.targetCumulativeScore)
+  const priorityTeam =
+    isTieBreak && encounter?.priorityParticipantId
+      ? tournament?.participants.find(p => p.participantId === encounter.priorityParticipantId)
+      : undefined
 
   // Adjacent match navigation
   const sortedMatches = [...(tournamentMatches ?? [])].sort((a, b) => {
@@ -288,15 +329,16 @@ export default function MatchPage() {
     return ta.localeCompare(tb)
   })
   const currentIdx = sortedMatches.findIndex(m => m.id === id)
-  const prevMatch = currentIdx > 0 ? sortedMatches[currentIdx - 1] : null
-  const nextMatch = currentIdx >= 0 && currentIdx < sortedMatches.length - 1
+  // Bouts are navigated through their encounter page, not the flat match list.
+  const prevMatch = !isBout && currentIdx > 0 ? sortedMatches[currentIdx - 1] : null
+  const nextMatch = !isBout && currentIdx >= 0 && currentIdx < sortedMatches.length - 1
     ? sortedMatches[currentIdx + 1]
     : null
 
   function matchLabel(m: typeof sortedMatches[0]) {
-    const p1 = tournament?.participants.find(p => p.fighterId === m.fighter1Id)
-    const p2 = tournament?.participants.find(p => p.fighterId === m.fighter2Id)
-    return `${p1?.lastName ?? '?'} – ${p2?.lastName ?? '?'}`
+    const p1 = tournament?.participants.find(p => p.participantId === m.fighter1Id)
+    const p2 = tournament?.participants.find(p => p.participantId === m.fighter2Id)
+    return `${p1 ? participantShortName(p1) : '?'} – ${p2 ? participantShortName(p2) : '?'}`
   }
 
   const warn1Over = match.effectiveMaxWarnings != null && match.warnings1 >= match.effectiveMaxWarnings
@@ -339,9 +381,48 @@ export default function MatchPage() {
         )}
       </div>
 
+      {/* Team series context */}
+      {isBout && encounter && (
+        <div style={{
+          border: '1px solid #d6e4f0', background: '#f3f8fd', borderRadius: 8,
+          padding: '10px 14px', margin: '4px 0 12px',
+          display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+        }}>
+          <Link to={`/encounters/${match.encounterId}`} style={{ color: '#1976d2', whiteSpace: 'nowrap' }}>
+            ← К серии
+          </Link>
+          <span style={{ fontWeight: 600 }}>
+            {teamName1 ? participantName(teamName1) : '?'} {encounter.score1}
+            <span style={{ color: '#bbb' }}> : </span>
+            {encounter.score2} {teamName2 ? participantName(teamName2) : '?'}
+          </span>
+          <span style={{ fontSize: '0.85em', color: '#888' }}>
+            {isTieBreak ? 'Tie-break (10-й бой)' : `Бой ${match.boutNumber} из 9`}
+            {!isTieBreak && match.targetCumulativeScore != null && ` · лимит серии ${match.targetCumulativeScore}`}
+          </span>
+          {priorityTeam && (
+            <span style={{
+              fontSize: '0.78em', padding: '1px 8px', borderRadius: 10,
+              background: '#fff4e5', color: '#a86500', fontWeight: 600,
+            }}>
+              Приоритет: {participantName(priorityTeam)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {capReached && isInProgress && (
+        <p style={{
+          textAlign: 'center', margin: '0 0 12px', padding: '8px 12px',
+          background: '#fff4e5', color: '#a86500', borderRadius: 6, fontWeight: 600,
+        }}>
+          ⚠ Достигнут лимит серии — завершите бой.
+        </p>
+      )}
+
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 12px', flexWrap: 'wrap' }}>
-        <h1 style={{ margin: 0, fontSize: '1.3em' }}>Бой</h1>
+        <h1 style={{ margin: 0, fontSize: '1.3em' }}>{isBout ? (isTieBreak ? 'Tie-break' : `Бой ${match.boutNumber}`) : 'Бой'}</h1>
         <span style={{
           padding: '2px 10px',
           borderRadius: 12,

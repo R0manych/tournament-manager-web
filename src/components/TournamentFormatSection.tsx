@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { tournamentsApi } from '../api/tournaments'
 import TournamentBracketView from './bracket/TournamentBracketView'
-import type { Match, TournamentParticipant } from '../api/types'
+import type { Encounter, Match, TournamentParticipant } from '../api/types'
 
 interface Props {
   tournamentId: string
@@ -10,9 +10,10 @@ interface Props {
   participants: TournamentParticipant[]
   defaultFightDurationSeconds?: number
   allMatches?: Match[]
+  encounters?: Encounter[]
 }
 
-export default function TournamentFormatSection({ tournamentId, hasMatches, participants, defaultFightDurationSeconds, allMatches }: Props) {
+export default function TournamentFormatSection({ tournamentId, hasMatches, participants, defaultFightDurationSeconds, allMatches, encounters }: Props) {
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -116,7 +117,7 @@ export default function TournamentFormatSection({ tournamentId, hasMatches, part
               padding: 20,
               background: '#fafafa',
             }}>
-              <TournamentBracketView format={format} participants={participants} fightDurationSeconds={defaultFightDurationSeconds} allMatches={allMatches} />
+              <TournamentBracketView format={format} participants={participants} fightDurationSeconds={defaultFightDurationSeconds} allMatches={allMatches} encounters={encounters} />
             </div>
           )}
         </div>

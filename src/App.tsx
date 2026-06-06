@@ -6,6 +6,7 @@ import TournamentDetailPage from './pages/TournamentDetailPage'
 import TournamentMatchesPage from './pages/TournamentMatchesPage'
 import FightersPage from './pages/FightersPage'
 import MatchPage from './pages/MatchPage'
+import EncounterPage from './pages/EncounterPage'
 import NotFoundPage from './pages/NotFoundPage'
 
 export default function App() {
@@ -19,6 +20,7 @@ export default function App() {
           <Route path="tournaments/:id/matches" element={<TournamentMatchesPage />} />
           <Route path="fighters" element={<FightersPage />} />
           <Route path="matches/:id" element={<MatchPage />} />
+          <Route path="encounters/:id" element={<EncounterPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

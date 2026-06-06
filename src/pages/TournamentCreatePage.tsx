@@ -15,10 +15,15 @@ export default function TournamentCreatePage() {
     location: '',
     startDate: '',
     endDate: '',
+    participantKind: 'Fighter',
     defaultRoundDurationSeconds: undefined,
     defaultMaxDoubles: undefined,
     defaultMaxWarnings: undefined,
+    defaultTeamTargetScore: undefined,
+    defaultTeamBoutDurationSeconds: undefined,
   })
+
+  const isTeam = form.participantKind === 'Team'
 
   const mut = useMutation({
     mutationFn: () => {
@@ -29,9 +34,12 @@ export default function TournamentCreatePage() {
         ...(form.location && { location: form.location }),
         startDate: form.startDate,
         endDate: form.endDate,
+        participantKind: form.participantKind,
         ...(form.defaultRoundDurationSeconds != null && { defaultRoundDurationSeconds: form.defaultRoundDurationSeconds }),
         ...(form.defaultMaxDoubles != null && { defaultMaxDoubles: form.defaultMaxDoubles }),
         ...(form.defaultMaxWarnings != null && { defaultMaxWarnings: form.defaultMaxWarnings }),
+        ...(isTeam && form.defaultTeamTargetScore != null && { defaultTeamTargetScore: form.defaultTeamTargetScore }),
+        ...(isTeam && form.defaultTeamBoutDurationSeconds != null && { defaultTeamBoutDurationSeconds: form.defaultTeamBoutDurationSeconds }),
       }
       return tournamentsApi.create(payload)
     },
@@ -71,6 +79,18 @@ export default function TournamentCreatePage() {
             style={inputStyle}
             placeholder="Открытый чемпионат по лонгсворду"
           />
+        </label>
+
+        <label style={labelStyle}>
+          Режим участия *
+          <select
+            value={form.participantKind ?? 'Fighter'}
+            onChange={e => setField('participantKind', e.target.value as CreateTournamentRequest['participantKind'])}
+            style={inputStyle}
+          >
+            <option value="Fighter">Одиночный (бойцы)</option>
+            <option value="Team">Командный (команды 3×3, FIE relay)</option>
+          </select>
         </label>
 
         <label style={labelStyle}>
@@ -162,6 +182,30 @@ export default function TournamentCreatePage() {
                 placeholder="3"
               />
             </label>
+            {isTeam && (
+              <>
+                <label style={labelStyle}>
+                  Целевой счёт серии (командная)
+                  <input
+                    type="number" min={1}
+                    value={form.defaultTeamTargetScore ?? ''}
+                    onChange={e => handleNumericField('defaultTeamTargetScore', e.target.value)}
+                    style={{ ...inputStyle, width: 100 }}
+                    placeholder="45"
+                  />
+                </label>
+                <label style={labelStyle}>
+                  Длительность bout (сек)
+                  <input
+                    type="number" min={1}
+                    value={form.defaultTeamBoutDurationSeconds ?? ''}
+                    onChange={e => handleNumericField('defaultTeamBoutDurationSeconds', e.target.value)}
+                    style={{ ...inputStyle, width: 100 }}
+                    placeholder="60"
+                  />
+                </label>
+              </>
+            )}
           </div>
         </details>
 
