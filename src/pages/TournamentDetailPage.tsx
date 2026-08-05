@@ -27,9 +27,7 @@ const STATUS_TRANSITIONS: Record<TournamentStatus, { status: TournamentStatus; l
   Cancelled: [{ status: 'Draft', label: '↩ Восстановить' }],
 }
 
-// ── Test-data pools (random teams/fighters) ────────────────────────────────
-const FIRST_NAMES = ['Иван', 'Пётр', 'Алексей', 'Дмитрий', 'Сергей', 'Андрей', 'Михаил', 'Николай', 'Олег', 'Роман', 'Павел', 'Юрий']
-const LAST_NAMES = ['Иванов', 'Петров', 'Смирнов', 'Кузнецов', 'Соколов', 'Попов', 'Лебедев', 'Козлов', 'Новиков', 'Морозов', 'Волков', 'Орлов']
+// ── Test-data pools (random team names) ─────────────────────────────────────
 const CLUB_NAMES = ['Сокол', 'Дружина', 'Гвардия', 'Легион', 'Викинг', 'Барс', 'Витязь', 'Орден']
 const rnd = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
 
@@ -618,17 +616,27 @@ export default function TournamentDetailPage() {
     },
   })
 
-  // Test data: create N teams, each created+registered with a full 3-fighter roster.
+  // Test data: create N teams, each filled with a full 3-fighter roster taken from
+  // EXISTING fighters not already used in another team of this tournament.
   const addRandomTeamsMut = useMutation({
     mutationFn: async (count: number) => {
+      const [allF, teams] = await Promise.all([fightersApi.list(), teamsApi.listByTournament(id!)])
+      const used = new Set(teams.flatMap(t => t.members.map(m => m.fighterId)))
+      const pool = allF.filter(f => !used.has(f.id)).sort(() => Math.random() - 0.5)
+
+      const need = count * 3
+      if (pool.length < need) {
+        throw new Error(`Недостаточно свободных бойцов: нужно ${need}, доступно ${pool.length}. Создайте бойцов на странице «Бойцы».`)
+      }
+
       const base = tournament!.participants.length
+      let pi = 0
       for (let i = 0; i < count; i++) {
         const no = base + i + 1
         const team = await teamsApi.create(id!, { name: `${rnd(CLUB_NAMES)}-${no}`, club: rnd(CLUB_NAMES) })
         await tournamentsApi.addParticipant(id!, team.id, no)
         for (let pos = 1; pos <= 3; pos++) {
-          const f = await fightersApi.create({ firstName: rnd(FIRST_NAMES), lastName: rnd(LAST_NAMES) })
-          await teamsApi.addMember(team.id, { fighterId: f.id, position: pos })
+          await teamsApi.addMember(team.id, { fighterId: pool[pi++].id, position: pos })
         }
       }
       return count
