@@ -4,7 +4,8 @@ import { Link, useParams } from 'react-router-dom'
 import { encountersApi } from '../api/encounters'
 import { tournamentsApi } from '../api/tournaments'
 import { teamsApi } from '../api/teams'
-import { assignGroups, groupEncountersByGroup } from '../components/bracket/bracketUtils'
+import { groupEncountersByGroup, resolvePhaseGroups } from '../components/bracket/bracketUtils'
+import { groupsApi } from '../api/groups'
 import type { Match, MatchStatus, Team } from '../api/types'
 import { participantName } from '../api/types'
 
@@ -59,6 +60,12 @@ export default function EncounterPage() {
   const { data: allEncounters } = useQuery({
     queryKey: ['encounters', encounter?.tournamentId],
     queryFn: () => encountersApi.listByTournament(encounter!.tournamentId),
+    enabled: !!encounter?.tournamentId,
+  })
+
+  const { data: savedGroups } = useQuery({
+    queryKey: ['tournament-groups', encounter?.tournamentId],
+    queryFn: () => groupsApi.list(encounter!.tournamentId),
     enabled: !!encounter?.tournamentId,
   })
 
@@ -117,7 +124,7 @@ export default function EncounterPage() {
   // In-group encounter navigation: order the current group's encounters by the
   // round-robin schedule and find the previous/next sibling.
   const rrPhase = format?.phases.find(p => p.type === 'roundRobin' && !(p as any).seeding?.groups)
-  const groups = rrPhase && tournament ? assignGroups(rrPhase as any, tournament.participants) : []
+  const groups = rrPhase && tournament ? resolvePhaseGroups(rrPhase as any, tournament.participants, savedGroups) : []
   const grouped = groupEncountersByGroup(groups, allEncounters ?? [])
   const myGroup = grouped.find(g => g.encounters.some(e => e.id === encounter.id))
   const groupEncounters = myGroup?.encounters ?? []

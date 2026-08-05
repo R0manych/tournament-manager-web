@@ -1,19 +1,28 @@
 import { useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { tournamentsApi } from '../api/tournaments'
+import { groupsApi, type SaveGroupItem } from '../api/groups'
 import TournamentBracketView from './bracket/TournamentBracketView'
-import type { Encounter, Match, TournamentParticipant } from '../api/types'
+import type { Encounter, Match, TournamentParticipant, TournamentStatus } from '../api/types'
 
 interface Props {
   tournamentId: string
+  status: TournamentStatus
   hasMatches: boolean
   participants: TournamentParticipant[]
   defaultFightDurationSeconds?: number
   allMatches?: Match[]
   encounters?: Encounter[]
+  // Single group-panel action: persist composition + generate group-stage fights.
+  groupsGenerating?: boolean
+  generateGroupsLabel?: string
+  onGenerateGroups?: (phaseId: string, groups: SaveGroupItem[]) => void
 }
 
-export default function TournamentFormatSection({ tournamentId, hasMatches, participants, defaultFightDurationSeconds, allMatches, encounters }: Props) {
+export default function TournamentFormatSection({
+  tournamentId, status, hasMatches, participants, defaultFightDurationSeconds,
+  allMatches, encounters, groupsGenerating, generateGroupsLabel, onGenerateGroups,
+}: Props) {
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -27,6 +36,11 @@ export default function TournamentFormatSection({ tournamentId, hasMatches, part
       if (err?.status === 404) return false
       return failureCount < 2
     },
+  })
+
+  const { data: savedGroups } = useQuery({
+    queryKey: ['tournament-groups', tournamentId],
+    queryFn: () => groupsApi.list(tournamentId),
   })
 
   const uploadMutation = useMutation({
@@ -117,7 +131,25 @@ export default function TournamentFormatSection({ tournamentId, hasMatches, part
               padding: 20,
               background: '#fafafa',
             }}>
-              <TournamentBracketView format={format} participants={participants} fightDurationSeconds={defaultFightDurationSeconds} allMatches={allMatches} encounters={encounters} />
+              <TournamentBracketView
+                format={format}
+                participants={participants}
+                fightDurationSeconds={defaultFightDurationSeconds}
+                allMatches={allMatches}
+                encounters={encounters}
+                savedGroups={savedGroups}
+                groupsEditable={status === 'Draft'}
+                groupsGenerating={groupsGenerating}
+                groupsLockedNote={
+                  status === 'Scheduled'
+                    ? 'Группы заблокированы: бои сгенерированы. Чтобы изменить состав, вернитесь к группам кнопкой у статуса турнира (сгенерированные бои будут удалены).'
+                    : status === 'Active'
+                      ? 'Группы заблокированы: бои начались. Изменение возможно только после сброса боёв (кнопка у статуса турнира).'
+                      : undefined
+                }
+                generateGroupsLabel={generateGroupsLabel}
+                onGenerateGroups={onGenerateGroups}
+              />
             </div>
           )}
         </div>
