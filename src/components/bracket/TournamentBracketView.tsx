@@ -1,6 +1,7 @@
 import type { Encounter, Match, TournamentFormat, TournamentParticipant } from '../../api/types'
+import type { SaveGroupItem, TournamentGroup } from '../../api/groups'
 import {
-  assignGroups, assignGroupsFromExplicitSeeding, buildSwissPool,
+  assignGroupsFromExplicitSeeding, buildSwissPool, resolvePhaseGroups,
   buildBracketRounds, calculateGroupStandings, encountersToStandingsMatches,
   resolvePlayoffSlots, resolveDERoundPairs,
   type PhaseStandingsCache,
@@ -17,9 +18,20 @@ interface Props {
   fightDurationSeconds?: number
   allMatches?: Match[]
   encounters?: Encounter[]
+  savedGroups?: TournamentGroup[]
+  // Group editing (snake-seeded RR phases, tournament in Draft): the panel's
+  // single action persists the composition and generates the group-stage fights.
+  groupsEditable?: boolean
+  groupsGenerating?: boolean
+  groupsLockedNote?: string
+  generateGroupsLabel?: string
+  onGenerateGroups?: (phaseId: string, groups: SaveGroupItem[]) => void
 }
 
-export default function TournamentBracketView({ format, participants, fightDurationSeconds, allMatches, encounters }: Props) {
+export default function TournamentBracketView({
+  format, participants, fightDurationSeconds, allMatches, encounters, savedGroups,
+  groupsEditable, groupsGenerating, groupsLockedNote, generateGroupsLabel, onGenerateGroups,
+}: Props) {
   const displayDuration = fightDurationSeconds ?? format.defaults?.roundDurationSeconds
 
   // Team group stages score from Encounters (aggregate per pair), singles from
@@ -35,7 +47,7 @@ export default function TournamentBracketView({ format, participants, fightDurat
     const p = phase as any
     const assignments = p.seeding?.groups
       ? assignGroupsFromExplicitSeeding(phase as any, standingsCache)
-      : assignGroups(phase as any, participants)
+      : resolvePhaseGroups(phase as any, participants, savedGroups)
     const standings = standingsSource
       ? calculateGroupStandings(phase, assignments, standingsSource)
       : assignments.map(() => [])
@@ -78,6 +90,7 @@ export default function TournamentBracketView({ format, participants, fightDurat
             }
           }
 
+          const isSnakePhase = !p.seeding?.groups
           return (
             <RoundRobinPhaseView
               key={phase.id}
@@ -85,6 +98,11 @@ export default function TournamentBracketView({ format, participants, fightDurat
               groups={groups}
               standings={phaseStandings}
               pointsPerMatch={p.pointsPerMatch}
+              editable={isSnakePhase && groupsEditable}
+              generating={groupsGenerating}
+              lockedNote={isSnakePhase ? groupsLockedNote : undefined}
+              generateLabel={generateGroupsLabel}
+              onGenerate={onGenerateGroups ? items => onGenerateGroups(phase.id, items) : undefined}
             />
           )
         }

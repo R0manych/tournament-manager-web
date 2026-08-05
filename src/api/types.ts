@@ -1,4 +1,5 @@
-export type TournamentStatus = 'Draft' | 'Active' | 'Completed' | 'Cancelled'
+// Draft → Scheduled (бои сгенерированы, группы заблокированы) → Active (бои идут)
+export type TournamentStatus = 'Draft' | 'Scheduled' | 'Active' | 'Completed' | 'Cancelled'
 export type MatchStatus = 'Scheduled' | 'InProgress' | 'Completed' | 'Cancelled' | 'WalkoverWin'
 export type ParticipantKind = 'Fighter' | 'Team'
 

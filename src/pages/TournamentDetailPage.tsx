@@ -11,18 +11,38 @@ import { participantName, participantClub } from '../api/types'
 import TournamentFormatSection from '../components/TournamentFormatSection'
 import TeamsSection from '../components/TeamsSection'
 import EncountersSection from '../components/EncountersSection'
-import { assignGroups, buildSwissPool, calculateGroupStandings, encountersToStandingsMatches, planSwissNextRound, resolvePlayoffSlots } from '../components/bracket/bracketUtils'
+import { groupsApi, type SaveGroupItem } from '../api/groups'
+import { buildSwissPool, calculateGroupStandings, encountersToStandingsMatches, planSwissNextRound, resolvePhaseGroups, resolvePlayoffSlots } from '../components/bracket/bracketUtils'
 
 const STATUS_LABELS: Record<TournamentStatus, string> = {
-  Draft: 'Черновик',
-  Active: 'Активен',
+  Draft: 'Черновик (настройка)',
+  Scheduled: 'Бои сгенерированы',
+  Active: 'Бои идут',
   Completed: 'Завершён',
   Cancelled: 'Отменён',
 }
 
-const STATUS_TRANSITIONS: Record<TournamentStatus, { status: TournamentStatus; label: string }[]> = {
-  Draft:     [{ status: 'Active', label: '▶ Начать' }, { status: 'Cancelled', label: '✕ Отменить' }],
-  Active:    [{ status: 'Completed', label: '✓ Завершить' }, { status: 'Cancelled', label: '✕ Отменить' }],
+// Flow: Draft (формат/участники/группы) → Scheduled (бои сгенерированы, группы
+// заблокированы) → Active (бои идут). Откаты к Draft удаляют бои на сервере и
+// требуют подтверждения.
+const STATUS_TRANSITIONS: Record<TournamentStatus, { status: TournamentStatus; label: string; confirm?: string }[]> = {
+  Draft:     [{ status: 'Cancelled', label: '✕ Отменить' }],
+  Scheduled: [
+    { status: 'Active', label: '▶ Начать бои' },
+    {
+      status: 'Draft', label: '↩ Вернуться к группам',
+      confirm: 'Вернуться к редактированию групп?\nВсе сгенерированные (несыгранные) бои будут удалены.',
+    },
+    { status: 'Cancelled', label: '✕ Отменить' },
+  ],
+  Active: [
+    { status: 'Completed', label: '✓ Завершить' },
+    {
+      status: 'Draft', label: '⟲ Сбросить бои',
+      confirm: 'СБРОС БОЁВ!\nВсе бои и их результаты (сходы, счёт) будут безвозвратно удалены, турнир вернётся к редактированию групп.\nПродолжить?',
+    },
+    { status: 'Cancelled', label: '✕ Отменить' },
+  ],
   Completed: [{ status: 'Active', label: '↩ Вернуть в активные' }],
   Cancelled: [{ status: 'Draft', label: '↩ Восстановить' }],
 }
@@ -72,12 +92,24 @@ export default function TournamentDetailPage() {
     enabled: !!id && tournament?.participantKind === 'Team',
   })
 
+  // Saved group composition — shared by all clients, used for display and generation.
+  const { data: savedGroups } = useQuery({
+    queryKey: ['tournament-groups', id],
+    queryFn: () => groupsApi.list(id!),
+    enabled: !!id,
+  })
+
   const statusMut = useMutation({
     mutationFn: (status: TournamentStatus) => tournamentsApi.setStatus(id!, status),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
       qc.invalidateQueries({ queryKey: ['tournaments'] })
+      // Rollback to Draft deletes generated fights server-side.
+      qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
+      qc.invalidateQueries({ queryKey: ['encounters', id] })
     },
+    onError: (err: unknown) =>
+      alert((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка смены статуса'),
   })
 
   const [selectedFighterId, setSelectedFighterId] = useState('')
@@ -101,10 +133,11 @@ export default function TournamentDetailPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['tournaments', id] }),
   })
 
+  // Single group-panel action: persist the composition dragged together in the
+  // panel, then generate the group-stage fights from it.
   const generateMut = useMutation({
-    mutationFn: async (phaseId: string) => {
-      const phase = format!.phases.find(p => p.id === phaseId)!
-      const groupAssignments = assignGroups(phase as any, tournament!.participants)
+    mutationFn: async ({ phaseId, groups }: { phaseId: string; groups: SaveGroupItem[] }) => {
+      await groupsApi.save(id!, phaseId, groups)
 
       // Team tournaments play each pair as an Encounter (series of bouts), not a
       // single flat match — generate one Encounter per in-group pair, idempotently.
@@ -115,8 +148,8 @@ export default function TournamentDetailPage() {
 
         const toCreate: Array<[string, string]> = []
         let skipped = 0
-        for (const group of groupAssignments) {
-          const teamIds = group.participants.map(p => p.fighterId)
+        for (const group of groups) {
+          const teamIds = group.participantIds
           for (let i = 0; i < teamIds.length; i++) {
             for (let j = i + 1; j < teamIds.length; j++) {
               if (existingPairs.has(pairKey(teamIds[i], teamIds[j]))) skipped++
@@ -140,13 +173,14 @@ export default function TournamentDetailPage() {
         return { created: toCreate.length, skipped, boutsFailed }
       }
 
-      const groups = groupAssignments.map(g => g.participants.map(p => p.fighterId))
-      return matchesApi.generateRoundRobin(id!, phaseId, groups)
+      // Singles: the server reads the saved composition itself.
+      return matchesApi.generateRoundRobin(id!, phaseId)
     },
     onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
       qc.invalidateQueries({ queryKey: ['encounters', id] })
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
+      qc.invalidateQueries({ queryKey: ['tournament-groups', id] })
       const failed = 'boutsFailed' in result ? result.boutsFailed : 0
       if (result.created > 0 || result.skipped > 0) {
         alert(
@@ -167,7 +201,7 @@ export default function TournamentDetailPage() {
       const p = sePhase as any
       const fromPhaseId: string = p.seeding?.from
       const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)!
-      const groupAssignments = assignGroups(rrPhase as any, tournament!.participants)
+      const groupAssignments = resolvePhaseGroups(rrPhase as any, tournament!.participants, savedGroups)
       const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, tournamentMatches ?? [])
       const slots = resolvePlayoffSlots(sePhase, groupStandings)
 
@@ -273,7 +307,7 @@ export default function TournamentDetailPage() {
       const p = sePhase as any
       const fromPhaseId: string = p.seeding?.from
       const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)!
-      const groupAssignments = assignGroups(rrPhase as any, tournament!.participants)
+      const groupAssignments = resolvePhaseGroups(rrPhase as any, tournament!.participants, savedGroups)
 
       const encs = await encountersApi.listByTournament(id!)
       const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, encountersToStandingsMatches(encs))
@@ -377,7 +411,7 @@ export default function TournamentDetailPage() {
       const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)
       if (!rrPhase) throw new Error(`Фаза '${fromPhaseId}' не найдена.`)
 
-      const groupAssignments = assignGroups(rrPhase as any, tournament!.participants)
+      const groupAssignments = resolvePhaseGroups(rrPhase as any, tournament!.participants, savedGroups)
       const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, tournamentMatches ?? [])
 
       const resolveSlot = (source: string, rank: number): string | null => {
@@ -704,7 +738,10 @@ export default function TournamentDetailPage() {
   const isTeam = tournament.participantKind === 'Team'
   const hasMatches = (tournament.matchesCount ?? 0) > 0
   const transitions = STATUS_TRANSITIONS[tournament.status]
-  const roundRobinPhases = format?.phases.filter(p => p.type === 'roundRobin') ?? []
+  // Кнопки генерации по этапам: групповые бои формируются из панели групп (Draft);
+  // плейофф/DE/швейцарка — по ходу турнира.
+  const canGeneratePlayoff = tournament.status === 'Scheduled' || tournament.status === 'Active'
+  const canGenerateSwiss = tournament.status === 'Draft' || tournament.status === 'Scheduled' || tournament.status === 'Active'
   const sePhases = format?.phases.filter(p => p.type === 'singleElimination') ?? []
   const dePhases = format?.phases.filter(p => p.type === 'doubleElimination') ?? []
   const swissPhases = format?.phases.filter(p => p.type === 'swiss') ?? []
@@ -723,46 +760,35 @@ export default function TournamentDetailPage() {
         {transitions.map(t => (
           <button
             key={t.status}
-            onClick={() => statusMut.mutate(t.status)}
+            onClick={() => {
+              if (t.confirm && !window.confirm(t.confirm)) return
+              statusMut.mutate(t.status)
+            }}
             disabled={statusMut.isPending}
           >
             {t.label}
           </button>
         ))}
-        {statusMut.isError && <span style={{ color: '#c00' }}>Ошибка смены статуса</span>}
       </div>
 
       <p>Даты: {tournament.startDate} — {tournament.endDate}</p>
 
       <TournamentFormatSection
         tournamentId={id!}
+        status={tournament.status}
         hasMatches={hasMatches}
         participants={tournament.participants}
         defaultFightDurationSeconds={tournament.defaultRoundDurationSeconds}
         allMatches={tournamentMatches}
         encounters={tournamentEncounters}
+        groupsGenerating={generateMut.isPending}
+        generateGroupsLabel={isTeam ? 'Сформировать встречи группового этапа' : 'Сформировать бои группового этапа'}
+        onGenerateGroups={(phaseId, groups) => generateMut.mutate({ phaseId, groups })}
       />
 
       <h2>Встречи {tournament.matchesCount > 0 && `(${tournament.matchesCount})`}</h2>
 
-      {roundRobinPhases.length > 0 && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-          {roundRobinPhases.map(phase => (
-            <button
-              key={phase.id}
-              onClick={() => generateMut.mutate(phase.id)}
-              disabled={generateMut.isPending}
-              title={isTeam
-                ? 'Создать командные встречи (серии боёв) по системе каждый-с-каждым в группах этой фазы'
-                : 'Сгенерировать все бои по системе каждый-с-каждым в группах этой фазы'}
-            >
-              {generateMut.isPending ? '…' : `⚙ Сгенерировать ${isTeam ? 'встречи' : 'бои'}: ${phase.name}`}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {!isTeam && sePhases.length > 0 && (
+      {!isTeam && canGeneratePlayoff && sePhases.length > 0 && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
           {sePhases.map(phase => (
             <button
@@ -777,7 +803,7 @@ export default function TournamentDetailPage() {
         </div>
       )}
 
-      {isTeam && sePhases.length > 0 && (
+      {isTeam && canGeneratePlayoff && sePhases.length > 0 && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
           {sePhases.map(phase => (
             <button
@@ -792,7 +818,7 @@ export default function TournamentDetailPage() {
         </div>
       )}
 
-      {!isTeam && dePhases.length > 0 && (
+      {!isTeam && canGeneratePlayoff && dePhases.length > 0 && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
           {dePhases.map(phase => (
             <button
@@ -807,7 +833,7 @@ export default function TournamentDetailPage() {
         </div>
       )}
 
-      {!isTeam && swissPhases.length > 0 && (
+      {!isTeam && canGenerateSwiss && swissPhases.length > 0 && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
           {swissPhases.map(phase => (
             <button

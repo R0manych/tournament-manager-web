@@ -14,7 +14,8 @@ export const matchesApi = {
   create: (tournamentId: string, data: CreateMatchRequest) =>
     api.post<Match>(`/tournaments/${tournamentId}/matches`, data),
   delete: (id: string) => api.delete(`/matches/${id}`),
-  generateRoundRobin: (tournamentId: string, phaseId: string, groups: string[][]) =>
+  // groups omitted → the server generates from the saved group composition.
+  generateRoundRobin: (tournamentId: string, phaseId: string, groups?: string[][]) =>
     api.post<GenerateRoundRobinResponse>(
       `/tournaments/${tournamentId}/matches/generate-round-robin`,
       { phaseId, groups }

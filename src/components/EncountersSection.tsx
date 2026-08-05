@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { encountersApi } from '../api/encounters'
 import { tournamentsApi } from '../api/tournaments'
-import { assignGroups, groupEncountersByGroup } from './bracket/bracketUtils'
+import { groupEncountersByGroup, resolvePhaseGroups } from './bracket/bracketUtils'
+import { groupsApi } from '../api/groups'
 import type { Encounter, TournamentParticipant } from '../api/types'
 import { participantName } from '../api/types'
 
@@ -42,6 +43,11 @@ export default function EncountersSection({ tournamentId, participants }: Props)
       (error as { status?: number })?.status !== 404 && failureCount < 2,
   })
 
+  const { data: savedGroups } = useQuery({
+    queryKey: ['tournament-groups', tournamentId],
+    queryFn: () => groupsApi.list(tournamentId),
+  })
+
   const nameOf = (id: string) => {
     const p = participants.find(x => x.participantId === id)
     return p ? participantName(p) : id.slice(0, 8)
@@ -53,6 +59,8 @@ export default function EncountersSection({ tournamentId, participants }: Props)
     onSuccess: () => {
       setP1(''); setP2('')
       qc.invalidateQueries({ queryKey: ['encounters', tournamentId] })
+      // First encounter flips tournament Draft→Scheduled on the server.
+      qc.invalidateQueries({ queryKey: ['tournaments', tournamentId] })
     },
     onError: (err: unknown) =>
       alert((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка создания встречи'),
@@ -63,7 +71,7 @@ export default function EncountersSection({ tournamentId, participants }: Props)
   // Only snake-seeded roundRobin phases are bucketed here; explicit-seeded phases
   // (seeding.groups) resolve from prior-phase standings and aren't grouped.
   const rrPhase = format?.phases.find(p => p.type === 'roundRobin' && !(p as any).seeding?.groups)
-  const groups = rrPhase ? assignGroups(rrPhase as any, participants) : []
+  const groups = rrPhase ? resolvePhaseGroups(rrPhase as any, participants, savedGroups) : []
   const grouped = groupEncountersByGroup(groups, encounters ?? [])
   const showGroupHeaders = groups.length > 1
 

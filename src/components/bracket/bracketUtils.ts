@@ -1,5 +1,6 @@
 import type { TournamentFormat, TournamentParticipant, Match, Encounter } from '../../api/types'
 import { participantName } from '../../api/types'
+import type { TournamentGroup } from '../../api/groups'
 
 // NOTE: `fighterId` here is an opaque participant id — a Fighter.Id in singles
 // tournaments and a Team.Id in team tournaments. The name is kept for minimal
@@ -65,6 +66,44 @@ export function assignGroups(
   })
 
   return groups
+}
+
+// ── Saved groups (persisted on the server) ─────────────────────────────────
+// Maps the saved composition of one phase to GroupAssignment[]. Returns null
+// when nothing is saved for the phase — caller falls back to snake seeding.
+// Participants no longer registered in the tournament are silently dropped.
+export function groupsFromSaved(
+  saved: TournamentGroup[] | undefined,
+  phaseId: string,
+  participants: TournamentParticipant[],
+): GroupAssignment[] | null {
+  const phaseGroups = (saved ?? []).filter(g => g.phaseId === phaseId)
+  if (phaseGroups.length === 0) return null
+
+  const byId = new Map(participants.map(p => [p.participantId, p]))
+  return phaseGroups.map((g, gi) => ({
+    groupIndex: gi,
+    groupLabel: g.label,
+    participants: g.participantIds
+      .map(pid => byId.get(pid))
+      .filter((p): p is TournamentParticipant => p != null)
+      .map((p, idx) => ({
+        fighterId: p.participantId,
+        seed: p.seed ?? idx + 1,
+        name: participantName(p),
+      })),
+  }))
+}
+
+// Saved composition wins; otherwise snake seeding. Explicit-seeded phases
+// (phase.seeding.groups) are resolved from standings elsewhere and are not
+// persisted.
+export function resolvePhaseGroups(
+  phase: TournamentFormat['phases'][0] & { type: 'roundRobin' },
+  participants: TournamentParticipant[],
+  saved: TournamentGroup[] | undefined,
+): GroupAssignment[] {
+  return groupsFromSaved(saved, phase.id, participants) ?? assignGroups(phase, participants)
 }
 
 // ── Team encounters → round-robin groups ────────────────────────────────────
