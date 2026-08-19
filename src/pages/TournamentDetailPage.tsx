@@ -7,20 +7,12 @@ import { encountersApi } from '../api/encounters'
 import { teamsApi } from '../api/teams'
 import { fightersApi } from '../api/fighters'
 import type { TournamentStatus } from '../api/types'
-import { participantName, participantClub } from '../api/types'
+import { participantName, participantClub, TOURNAMENT_STATUS_LABELS } from '../api/types'
 import TournamentFormatSection from '../components/TournamentFormatSection'
 import TeamsSection from '../components/TeamsSection'
 import EncountersSection from '../components/EncountersSection'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
 import { buildSwissPool, calculateGroupStandings, encountersToStandingsMatches, planSwissNextRound, resolvePhaseGroups, resolvePlayoffSlots } from '../components/bracket/bracketUtils'
-
-const STATUS_LABELS: Record<TournamentStatus, string> = {
-  Draft: 'Черновик (настройка)',
-  Scheduled: 'Бои сгенерированы',
-  Active: 'Бои идут',
-  Completed: 'Завершён',
-  Cancelled: 'Отменён',
-}
 
 // Flow: Draft (формат/участники/группы) → Scheduled (бои сгенерированы, группы
 // заблокированы) → Active (бои идут). Откаты к Draft удаляют бои на сервере и
@@ -44,7 +36,7 @@ const STATUS_TRANSITIONS: Record<TournamentStatus, { status: TournamentStatus; l
     { status: 'Cancelled', label: '✕ Отменить' },
   ],
   Completed: [{ status: 'Active', label: '↩ Вернуть в активные' }],
-  Cancelled: [{ status: 'Draft', label: '↩ Восстановить' }],
+  Cancelled: [], // терминальный статус: сервер запрещает любой переход из Cancelled
 }
 
 // ── Test-data pools (random team names) ─────────────────────────────────────
@@ -736,7 +728,6 @@ export default function TournamentDetailPage() {
   if (!tournament) return <p>Турнир не найден</p>
 
   const isTeam = tournament.participantKind === 'Team'
-  const hasMatches = (tournament.matchesCount ?? 0) > 0
   const transitions = STATUS_TRANSITIONS[tournament.status]
   // Кнопки генерации по этапам: групповые бои формируются из панели групп (Draft);
   // плейофф/DE/швейцарка — по ходу турнира.
@@ -756,7 +747,7 @@ export default function TournamentDetailPage() {
       {tournament.description && <p>{tournament.description}</p>}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <span>Статус: <strong>{STATUS_LABELS[tournament.status]}</strong></span>
+        <span>Статус: <strong>{TOURNAMENT_STATUS_LABELS[tournament.status]}</strong></span>
         {transitions.map(t => (
           <button
             key={t.status}
@@ -776,7 +767,6 @@ export default function TournamentDetailPage() {
       <TournamentFormatSection
         tournamentId={id!}
         status={tournament.status}
-        hasMatches={hasMatches}
         participants={tournament.participants}
         defaultFightDurationSeconds={tournament.defaultRoundDurationSeconds}
         allMatches={tournamentMatches}

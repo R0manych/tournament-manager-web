@@ -1,6 +1,13 @@
 const BASE_URL = '/api/v1'
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// Body plus headers, for the few endpoints that say something outside the body
+// (X-Groups-Cleared on a forced format replace/delete — see B-2).
+export interface ApiResult<T> {
+  data: T
+  headers: Headers
+}
+
+async function requestWithMeta<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
   const isFormData = init?.body instanceof FormData
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
@@ -14,8 +21,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw Object.assign(new Error(problem.title ?? res.statusText), { status: res.status, problem })
   }
 
-  if (res.status === 204) return undefined as T
-  return res.json()
+  if (res.status === 204) return { data: undefined as T, headers: res.headers }
+  return { data: await res.json(), headers: res.headers }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const { data } = await requestWithMeta<T>(path, init)
+  return data
 }
 
 async function getRaw(path: string): Promise<Response> {
@@ -36,7 +48,10 @@ export const api = {
     request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   putForm: <T>(path: string, formData: FormData) =>
     request<T>(path, { method: 'PUT', body: formData }),
+  putFormWithMeta: <T>(path: string, formData: FormData) =>
+    requestWithMeta<T>(path, { method: 'PUT', body: formData }),
   patch: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
   delete: (path: string) => request<void>(path, { method: 'DELETE' }),
+  deleteWithMeta: (path: string) => requestWithMeta<void>(path, { method: 'DELETE' }),
 }

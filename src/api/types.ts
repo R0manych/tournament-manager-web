@@ -37,6 +37,16 @@ export interface TournamentParticipant {
   registeredAt: string
 }
 
+// Status wording is user-facing in several places (tournament header, format
+// freeze warnings) — keep one map so they never drift apart.
+export const TOURNAMENT_STATUS_LABELS: Record<TournamentStatus, string> = {
+  Draft: 'Черновик (настройка)',
+  Scheduled: 'Бои сгенерированы',
+  Active: 'Бои идут',
+  Completed: 'Завершён',
+  Cancelled: 'Отменён',
+}
+
 // Display helpers — single source of truth for rendering a participant label.
 export function participantName(p: TournamentParticipant): string {
   if (p.kind === 'Team') return p.team?.name ?? p.participantId.slice(0, 8)

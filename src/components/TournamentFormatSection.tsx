@@ -4,11 +4,14 @@ import { tournamentsApi } from '../api/tournaments'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
 import TournamentBracketView from './bracket/TournamentBracketView'
 import type { Encounter, Match, TournamentParticipant, TournamentStatus } from '../api/types'
+import { TOURNAMENT_STATUS_LABELS } from '../api/types'
+
+// Which forced write the organiser is being asked to confirm (B-2).
+type ForcedWrite = 'replace' | 'delete'
 
 interface Props {
   tournamentId: string
   status: TournamentStatus
-  hasMatches: boolean
   participants: TournamentParticipant[]
   defaultFightDurationSeconds?: number
   allMatches?: Match[]
@@ -20,13 +23,22 @@ interface Props {
 }
 
 export default function TournamentFormatSection({
-  tournamentId, status, hasMatches, participants, defaultFightDurationSeconds,
+  tournamentId, status, participants, defaultFightDurationSeconds,
   allMatches, encounters, groupsGenerating, generateGroupsLabel, onGenerateGroups,
 }: Props) {
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [showBracket, setShowBracket] = useState(true)
+
+  // The server freezes the format outside Draft (TournamentSetupGuard) and only
+  // lets it through with ?force=true — mirror that criterion, not matchesCount.
+  const isDraft = status === 'Draft'
+  const [pendingForce, setPendingForce] = useState<ForcedWrite | null>(null)
+  // The file is chosen before the warning, so a cancelled picker can never leave
+  // a "force" flag armed for the next, unrelated replace.
+  const [pendingFile, setPendingFile] = useState<File | null>(null)
+  const [clearedNote, setClearedNote] = useState<string | null>(null)
 
   const { data: format, isLoading, isError } = useQuery({
     queryKey: ['tournament-format', tournamentId],
@@ -43,23 +55,38 @@ export default function TournamentFormatSection({
     queryFn: () => groupsApi.list(tournamentId),
   })
 
+  // A forced write prunes TournamentGroups server-side; the cached composition would
+  // otherwise keep drawing groups that no longer exist. X-Groups-Cleared tells how many.
+  const afterFormatWrite = (groupsCleared: number) => {
+    qc.invalidateQueries({ queryKey: ['tournament-format', tournamentId] })
+    qc.invalidateQueries({ queryKey: ['tournament-groups', tournamentId] })
+    setClearedNote(
+      groupsCleared > 0 ? `Удалено сохранённых составов групп: ${groupsCleared}.` : null,
+    )
+  }
+
+  const problemMessage = (err: unknown, fallback: string) => {
+    const e = err as { problem?: { detail?: string; title?: string } }
+    return e?.problem?.detail ?? e?.problem?.title ?? fallback
+  }
+
   const uploadMutation = useMutation({
-    mutationFn: (file: File) => tournamentsApi.format.upload(tournamentId, file),
-    onSuccess: () => {
+    mutationFn: ({ file, force }: { file: File; force: boolean }) =>
+      tournamentsApi.format.upload(tournamentId, file, force),
+    onSuccess: (res) => {
       setUploadError(null)
-      qc.invalidateQueries({ queryKey: ['tournament-format', tournamentId] })
+      afterFormatWrite(res.groupsCleared)
     },
-    onError: (err: unknown) => {
-      const e = err as { problem?: { detail?: string; title?: string } }
-      setUploadError(e?.problem?.detail ?? e?.problem?.title ?? 'Ошибка загрузки')
-    },
+    onError: (err: unknown) => setUploadError(problemMessage(err, 'Ошибка загрузки')),
   })
 
   const deleteMutation = useMutation({
-    mutationFn: () => tournamentsApi.format.delete(tournamentId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['tournament-format', tournamentId] })
+    mutationFn: (force: boolean) => tournamentsApi.format.delete(tournamentId, force),
+    onSuccess: (res) => {
+      setUploadError(null)
+      afterFormatWrite(res.groupsCleared)
     },
+    onError: (err: unknown) => setUploadError(problemMessage(err, 'Ошибка удаления формата')),
   })
 
   const [downloading, setDownloading] = useState(false)
@@ -72,12 +99,40 @@ export default function TournamentFormatSection({
     }
   }
 
+  // In Draft the upload is the plain, unforced call; outside it the file waits for
+  // the organiser to confirm the consequences.
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
+    e.target.value = ''
     if (!file) return
     setUploadError(null)
-    uploadMutation.mutate(file)
-    e.target.value = ''
+    setClearedNote(null)
+    if (isDraft) uploadMutation.mutate({ file, force: false })
+    else {
+      setPendingFile(file)
+      setPendingForce('replace')
+    }
+  }
+
+  const handleDeleteClick = () => {
+    setUploadError(null)
+    setClearedNote(null)
+    if (isDraft) deleteMutation.mutate(false)
+    else setPendingForce('delete')
+  }
+
+  const cancelForced = () => {
+    setPendingForce(null)
+    setPendingFile(null)
+  }
+
+  const confirmForced = () => {
+    if (pendingForce === 'replace') {
+      if (pendingFile) uploadMutation.mutate({ file: pendingFile, force: true })
+    } else if (pendingForce === 'delete') {
+      deleteMutation.mutate(true)
+    }
+    cancelForced()
   }
 
   if (isLoading) return <section><h2>Формат турнира</h2><p>Загрузка...</p></section>
@@ -105,24 +160,27 @@ export default function TournamentFormatSection({
             <p style={{ color: '#555', fontSize: '0.9em', marginBottom: 6 }}>{format.description}</p>
           )}
           <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-            <button onClick={handleDownload} disabled={downloading}>
+            <button type="button" onClick={handleDownload} disabled={downloading}>
               {downloading ? 'Скачивание...' : 'Скачать YAML'}
             </button>
-            {!hasMatches && (
-              <>
-                <button onClick={() => fileRef.current?.click()} disabled={uploadMutation.isPending}>
-                  Заменить
-                </button>
-                <button
-                  onClick={() => deleteMutation.mutate()}
-                  disabled={deleteMutation.isPending}
-                  style={{ color: '#cc0000' }}
-                >
-                  Удалить
-                </button>
-              </>
-            )}
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              disabled={uploadMutation.isPending}
+            >
+              {uploadMutation.isPending ? 'Загрузка...' : isDraft ? 'Заменить' : 'Заменить...'}
+            </button>
+            <button
+              type="button"
+              onClick={handleDeleteClick}
+              disabled={deleteMutation.isPending}
+              style={{ color: '#cc0000' }}
+            >
+              {isDraft ? 'Удалить' : 'Удалить...'}
+            </button>
           </div>
+
+          {!isDraft && <FrozenNote status={status} />}
 
           {showBracket && (
             <div style={{
@@ -156,18 +214,19 @@ export default function TournamentFormatSection({
       ) : (
         <div>
           <p style={{ color: '#666', marginBottom: 8 }}>Формат не загружен</p>
-          <button onClick={() => fileRef.current?.click()} disabled={uploadMutation.isPending || hasMatches}>
-            {uploadMutation.isPending ? 'Загрузка...' : 'Загрузить YAML'}
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            disabled={uploadMutation.isPending}
+          >
+            {uploadMutation.isPending ? 'Загрузка...' : isDraft ? 'Загрузить YAML' : 'Загрузить YAML...'}
           </button>
-          {hasMatches && (
-            <p style={{ fontSize: '0.85em', color: '#999', marginTop: 4 }}>
-              Формат заморожен — у турнира уже есть встречи
-            </p>
-          )}
+          {!isDraft && <FrozenNote status={status} />}
         </div>
       )}
 
-      {uploadError && <p style={{ color: '#cc0000', marginTop: 8 }}>{uploadError}</p>}
+      {uploadError && <p style={{ color: '#cc0000', marginTop: 8 }} role="alert">{uploadError}</p>}
+      {clearedNote && <p style={{ color: '#8a6d00', marginTop: 8 }} role="status">{clearedNote}</p>}
 
       <input
         ref={fileRef}
@@ -176,6 +235,92 @@ export default function TournamentFormatSection({
         style={{ display: 'none' }}
         onChange={handleFileChange}
       />
+
+      {pendingForce && (
+        <ForceConfirmDialog
+          action={pendingForce}
+          status={status}
+          fileName={pendingFile?.name}
+          onCancel={cancelForced}
+          onConfirm={confirmForced}
+        />
+      )}
     </section>
+  )
+}
+
+// Same criterion as the server: everything outside Draft is frozen, and the honest
+// way back is the rollback at the tournament status (it deletes generated matches).
+function FrozenNote({ status }: { status: TournamentStatus }) {
+  return (
+    <p style={{ fontSize: '0.85em', color: '#8a6d00', marginTop: 4 }}>
+      Формат заморожен: турнир в статусе «{TOURNAMENT_STATUS_LABELS[status]}», правки
+      возможны только в черновике. Верните турнир в черновик кнопкой у статуса —
+      либо замените формат принудительно, приняв последствия.
+    </p>
+  )
+}
+
+interface ForceConfirmDialogProps {
+  action: ForcedWrite
+  status: TournamentStatus
+  fileName?: string
+  onCancel: () => void
+  onConfirm: () => void
+}
+
+function ForceConfirmDialog({ action, status, fileName, onCancel, onConfirm }: ForceConfirmDialogProps) {
+  const isReplace = action === 'replace'
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, zIndex: 100,
+      }}
+      onKeyDown={(e) => { if (e.key === 'Escape') onCancel() }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="format-force-title"
+        style={{
+          background: '#fff', borderRadius: 8, padding: 20,
+          maxWidth: 560, width: '100%', maxHeight: '90vh', overflowY: 'auto',
+        }}
+      >
+        <h3 id="format-force-title" style={{ marginTop: 0 }}>
+          {isReplace ? 'Заменить формат начатого турнира?' : 'Удалить формат начатого турнира?'}
+        </h3>
+        <p style={{ marginBottom: 8 }}>
+          Турнир в статусе «{TOURNAMENT_STATUS_LABELS[status]}» — обычно формат в нём
+          заморожен. Принудительная операция сделает следующее:
+        </p>
+        <ul style={{ marginTop: 0, paddingLeft: 20 }}>
+          <li>
+            {isReplace
+              ? 'Сохранённые составы групп фаз, которых нет в новом формате, будут удалены (составы совпавших фаз сохранятся).'
+              : 'Все сохранённые составы групп турнира будут удалены.'}
+          </li>
+          <li>
+            Уже сгенерированные встречи и серии останутся как есть — они могут не
+            соответствовать новой сетке.
+          </li>
+          <li>Отменить операцию нельзя.</li>
+        </ul>
+        <p style={{ color: '#555', fontSize: '0.9em' }}>
+          Безопасный путь — вернуть турнир в черновик кнопкой у статуса: сгенерированные
+          встречи будут удалены, и формат станет редактируемым штатно.
+        </p>
+        {isReplace && fileName && (
+          <p style={{ fontSize: '0.9em' }}>Файл: <strong>{fileName}</strong></p>
+        )}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+          <button type="button" onClick={onCancel} autoFocus>Отмена</button>
+          <button type="button" onClick={onConfirm} style={{ color: '#cc0000' }}>
+            {isReplace ? 'Понимаю риски — заменить' : 'Понимаю риски — удалить'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }

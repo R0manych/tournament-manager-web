@@ -16,9 +16,13 @@ export interface SaveGroupItem {
 }
 
 export const groupsApi = {
+  // Read-only summary across all phases.
   list: (tournamentId: string) =>
     api.get<TournamentGroup[]>(`/tournaments/${tournamentId}/groups`),
+  // The per-phase collection: what `save` replaces, same URI.
+  listByPhase: (tournamentId: string, phaseId: string) =>
+    api.get<TournamentGroup[]>(`/tournaments/${tournamentId}/phases/${phaseId}/groups`),
   // Replaces the saved composition of one phase's groups.
   save: (tournamentId: string, phaseId: string, groups: SaveGroupItem[]) =>
-    api.put<TournamentGroup[]>(`/tournaments/${tournamentId}/groups`, { phaseId, groups }),
+    api.put<TournamentGroup[]>(`/tournaments/${tournamentId}/phases/${phaseId}/groups`, { groups }),
 }
