@@ -14,7 +14,8 @@ import EncountersSection from '../components/EncountersSection'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
 import {
   buildSwissPool, calculateGroupStandings, createCellLookup, encountersToStandingsMatches,
-  matchesOfPhase, placementsOf, planSwissNextRound, resolvePhaseGroups, resolvePlayoffSlots, seRounds,
+  grandFinalHint, matchesOfPhase, placementsOf, planSwissNextRound, resolveGrandFinalSeries,
+  resolvePhaseGroups, resolvePlayoffSlots, seRounds,
   GRAND_FINAL_RESET_ROUND_ID, GRAND_FINAL_ROUND_ID, THIRD_PLACE_ROUND_ID,
 } from '../components/bracket/bracketUtils'
 
@@ -592,51 +593,66 @@ export default function TournamentDetailPage() {
         if (hasUnfinished(lbRoundPairs[ri], lbRounds[ri].id)) break
       }
 
-      // Grand Final: after both bracket finals are complete
-      const ubFinalId = ubRounds[ubRounds.length - 1]?.id
-      const lbFinalId = lbRounds[lbRounds.length - 1]?.id
-      const ubFP = ubRoundPairs[ubRoundPairs.length - 1]
-      const lbFP = lbRoundPairs[lbRoundPairs.length - 1]
-      if (ubFP && lbFP && ubFinalId && lbFinalId
-          && isComplete(ubFP, ubFinalId) && isComplete(lbFP, lbFinalId)) {
-        const ubW = ubFP[0] ? matchWinner(ubFinalId, 0, ubFP[0][0]!, ubFP[0][1]!) : null
-        const lbW = lbFP[0] ? matchWinner(lbFinalId, 0, lbFP[0][0]!, lbFP[0][1]!) : null
-        if (ubW && lbW) {
-          const gf = lookup.find(GRAND_FINAL_ROUND_ID, 0, ubW, lbW)
-          if (!gf) {
-            creates.push({
-              fighter1Id: ubW,
-              fighter2Id: lbW,
-              placement: { phaseId, roundId: GRAND_FINAL_ROUND_ID, slotIndex: 0 },
-            })
-          } else if (
-            // Матч-сброс: та же пара сразу после гранд-финала — без ячеек его
-            // было не отличить от самого гранд-финала (инвариант 39). Поэтому
-            // создаём его только в размещённой фазе; старый турнир такой сетки
-            // не различает и остаётся без матча-сброса.
-            lookup.placed
-            && (dePhase.grandFinal === 'reset' || dePhase.grandFinal === 'advantage')
-            && gf.status === 'Completed' && gf.winnerId === lbW
-            && !lookup.at(GRAND_FINAL_RESET_ROUND_ID, 0)
-          ) {
-            creates.push({
-              fighter1Id: ubW,
-              fighter2Id: lbW,
-              placement: { phaseId, roundId: GRAND_FINAL_RESET_ROUND_ID, slotIndex: 0 },
-            })
-          }
-        }
+      // Гранд-финал (АР-15, инварианты 37-40). В режимах `reset`/`advantage` это
+      // серия до двух побед с форой верхней сетки: победитель UB входит со
+      // счётом 1:0 и ему хватает одной победы, победителю LB нужны обе. Граф
+      // встреч у обоих режимов один (спека формата §4.8) — расходятся только
+      // подписи в интерфейсе, поэтому генерация у них общая.
+      //
+      // Порядок слотов существенный: `fighter1Id` — всегда представитель
+      // верхней сетки, на нём же держится счёт серии и определение чемпиона.
+      const ubFinalRound = ubRounds[ubRounds.length - 1]
+      const lbFinalRound = lbRounds[lbRounds.length - 1]
+      const bracketFinalWinner = (round: { id: string } | undefined, pairs: Pair[][]): string | null => {
+        if (!round || pairs.length === 0) return null
+        const pair = pairs[pairs.length - 1][0]
+        const m = lookup.find(round.id, 0, pair?.[0], pair?.[1])
+        return m?.status === 'Completed' && m.winnerId ? m.winnerId : null
       }
 
-      if (creates.length === 0)
-        throw new Error('Нет встреч для генерации. Завершите текущие бои, чтобы сформировать следующий раунд.')
+      const gfSeries = resolveGrandFinalSeries(
+        dePhase.grandFinal,
+        lookup,
+        bracketFinalWinner(ubFinalRound, ubRoundPairs),
+        bracketFinalWinner(lbFinalRound, lbRoundPairs),
+      )
+      if (gfSeries.next) {
+        creates.push({
+          fighter1Id: gfSeries.next.fighter1Id,
+          fighter2Id: gfSeries.next.fighter2Id,
+          placement: { phaseId, roundId: gfSeries.next.roundId, slotIndex: gfSeries.next.slotIndex },
+        })
+      }
 
-      return Promise.all(creates.map(req => matchesApi.create(id!, req)))
+      if (creates.length === 0) {
+        // Гранд-финал знает про себя больше, чем общая фраза: чемпион уже
+        // определён, счёт серии 1:1 и ждём матч-сброс, и т. п.
+        const nameOf = (pid: string) => {
+          const p = tournament!.participants.find(x => x.participantId === pid)
+          return p ? participantName(p) : pid.slice(0, 8)
+        }
+        throw new Error(
+          grandFinalHint(gfSeries, nameOf)
+          ?? 'Нет встреч для генерации. Завершите текущие бои, чтобы сформировать следующий раунд.',
+        )
+      }
+
+      const created = await Promise.all(creates.map(req => matchesApi.create(id!, req)))
+      return { count: created.length, gfStage: gfSeries.next?.roundId ?? null, isSeries: gfSeries.isSeries }
     },
-    onSuccess: (results) => {
+    onSuccess: ({ count, gfStage, isSeries }) => {
       qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
-      alert(`Создано встреч: ${results.length}`)
+      // Правило серии стоит проговорить ровно в тот момент, когда организатор
+      // её начинает: гандикап верхней сетки нигде в самой встрече не виден —
+      // стартовый счёт хранить негде (АР-15), он живёт только в счёте серии.
+      if (gfStage === GRAND_FINAL_RESET_ROUND_ID) {
+        alert('Создан матч-сброс: победитель нижней сетки сравнял серию 1:1. Победитель второго матча — чемпион.')
+      } else if (gfStage === GRAND_FINAL_ROUND_ID && isSeries) {
+        alert('Создан гранд-финал. Счёт серии 1:0 в пользу победителя верхней сетки: ему достаточно одной победы, победителю нижней нужны обе.')
+      } else {
+        alert(`Создано встреч: ${count}`)
+      }
     },
     onError: (err: unknown) => alert(generationError(err, 'Ошибка генерации DE плейофф')),
   })
