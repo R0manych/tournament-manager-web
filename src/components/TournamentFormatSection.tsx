@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { tournamentsApi } from '../api/tournaments'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
 import TournamentBracketView from './bracket/TournamentBracketView'
-import type { Encounter, Match, TournamentParticipant, TournamentStatus } from '../api/types'
+import type { Encounter, Match, MatchPlacement, TournamentParticipant, TournamentStatus } from '../api/types'
 import { TOURNAMENT_STATUS_LABELS } from '../api/types'
 
 // Which forced write the organiser is being asked to confirm (B-2).
@@ -16,6 +16,7 @@ interface Props {
   defaultFightDurationSeconds?: number
   allMatches?: Match[]
   encounters?: Encounter[]
+  placements?: MatchPlacement[]
   // Single group-panel action: persist composition + generate group-stage fights.
   groupsGenerating?: boolean
   generateGroupsLabel?: string
@@ -24,7 +25,7 @@ interface Props {
 
 export default function TournamentFormatSection({
   tournamentId, status, participants, defaultFightDurationSeconds,
-  allMatches, encounters, groupsGenerating, generateGroupsLabel, onGenerateGroups,
+  allMatches, encounters, placements, groupsGenerating, generateGroupsLabel, onGenerateGroups,
 }: Props) {
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
@@ -55,14 +56,21 @@ export default function TournamentFormatSection({
     queryFn: () => groupsApi.list(tournamentId),
   })
 
-  // A forced write prunes TournamentGroups server-side; the cached composition would
-  // otherwise keep drawing groups that no longer exist. X-Groups-Cleared tells how many.
-  const afterFormatWrite = (groupsCleared: number) => {
+  // A forced write prunes TournamentGroups server-side, and with them the bracket
+  // placements of phases the new format no longer describes (инвариант 45); the cached
+  // composition would otherwise keep drawing groups and cells that no longer exist.
+  // X-Groups-Cleared / X-Placements-Cleared tell how many.
+  const afterFormatWrite = (groupsCleared: number, placementsCleared: number) => {
     qc.invalidateQueries({ queryKey: ['tournament-format', tournamentId] })
     qc.invalidateQueries({ queryKey: ['tournament-groups', tournamentId] })
-    setClearedNote(
-      groupsCleared > 0 ? `Удалено сохранённых составов групп: ${groupsCleared}.` : null,
-    )
+    // Размещения живут внутри встреч, поэтому обнулившиеся ячейки видны только
+    // после перечитывания списка встреч.
+    qc.invalidateQueries({ queryKey: ['tournament-matches', tournamentId] })
+    const parts = [
+      groupsCleared > 0 ? `составов групп: ${groupsCleared}` : null,
+      placementsCleared > 0 ? `размещений встреч в сетке: ${placementsCleared}` : null,
+    ].filter(Boolean)
+    setClearedNote(parts.length > 0 ? `Удалено — ${parts.join('; ')}.` : null)
   }
 
   const problemMessage = (err: unknown, fallback: string) => {
@@ -75,7 +83,7 @@ export default function TournamentFormatSection({
       tournamentsApi.format.upload(tournamentId, file, force),
     onSuccess: (res) => {
       setUploadError(null)
-      afterFormatWrite(res.groupsCleared)
+      afterFormatWrite(res.groupsCleared, res.placementsCleared)
     },
     onError: (err: unknown) => setUploadError(problemMessage(err, 'Ошибка загрузки')),
   })
@@ -84,7 +92,7 @@ export default function TournamentFormatSection({
     mutationFn: (force: boolean) => tournamentsApi.format.delete(tournamentId, force),
     onSuccess: (res) => {
       setUploadError(null)
-      afterFormatWrite(res.groupsCleared)
+      afterFormatWrite(res.groupsCleared, res.placementsCleared)
     },
     onError: (err: unknown) => setUploadError(problemMessage(err, 'Ошибка удаления формата')),
   })
@@ -196,6 +204,7 @@ export default function TournamentFormatSection({
                 allMatches={allMatches}
                 encounters={encounters}
                 savedGroups={savedGroups}
+                placements={placements}
                 groupsEditable={status === 'Draft'}
                 groupsGenerating={groupsGenerating}
                 groupsLockedNote={
@@ -300,6 +309,11 @@ function ForceConfirmDialog({ action, status, fileName, onCancel, onConfirm }: F
             {isReplace
               ? 'Сохранённые составы групп фаз, которых нет в новом формате, будут удалены (составы совпавших фаз сохранятся).'
               : 'Все сохранённые составы групп турнира будут удалены.'}
+          </li>
+          <li>
+            {isReplace
+              ? 'Размещения встреч в ячейках сетки для исчезнувших фаз тоже будут удалены — эти встречи выпадут из сетки.'
+              : 'Все размещения встреч в ячейках сетки будут удалены — сетка опустеет.'}
           </li>
           <li>
             Уже сгенерированные встречи и серии останутся как есть — они могут не

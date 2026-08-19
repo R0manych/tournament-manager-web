@@ -1,18 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { tournamentsApi } from '../api/tournaments'
 import { matchesApi } from '../api/matches'
 import { encountersApi } from '../api/encounters'
 import { teamsApi } from '../api/teams'
 import { fightersApi } from '../api/fighters'
-import type { TournamentStatus } from '../api/types'
+import type { CreateMatchRequest, Match, TournamentStatus } from '../api/types'
 import { participantName, participantClub, TOURNAMENT_STATUS_LABELS } from '../api/types'
 import TournamentFormatSection from '../components/TournamentFormatSection'
 import TeamsSection from '../components/TeamsSection'
 import EncountersSection from '../components/EncountersSection'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
-import { buildSwissPool, calculateGroupStandings, encountersToStandingsMatches, planSwissNextRound, resolvePhaseGroups, resolvePlayoffSlots } from '../components/bracket/bracketUtils'
+import {
+  buildSwissPool, calculateGroupStandings, createCellLookup, encountersToStandingsMatches,
+  matchesOfPhase, placementsOf, planSwissNextRound, resolvePhaseGroups, resolvePlayoffSlots, seRounds,
+  GRAND_FINAL_RESET_ROUND_ID, GRAND_FINAL_ROUND_ID, THIRD_PLACE_ROUND_ID,
+} from '../components/bracket/bracketUtils'
 
 // Flow: Draft (формат/участники/группы) → Scheduled (бои сгенерированы, группы
 // заблокированы) → Active (бои идут). Откаты к Draft удаляют бои на сервере и
@@ -42,6 +46,19 @@ const STATUS_TRANSITIONS: Record<TournamentStatus, { status: TournamentStatus; l
 // ── Test-data pools (random team names) ─────────────────────────────────────
 const CLUB_NAMES = ['Сокол', 'Дружина', 'Гвардия', 'Легион', 'Викинг', 'Барс', 'Витязь', 'Орден']
 const rnd = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
+
+// Сообщение об ошибке генерации. 409 от `POST /matches` — это занятая ячейка
+// сетки: раунд уже сгенерирован (другой вкладкой или прошлым кликом). Именно на
+// этом ответе держится идемпотентность генерации плейофф (docs/08 §8), поэтому
+// показываем его отдельной, понятной организатору фразой.
+function generationError(err: unknown, fallback: string): string {
+  const e = err as { status?: number; problem?: { detail?: string } }
+  if (e?.status === 409) {
+    return 'Ячейка сетки уже занята другой встречей — похоже, этот раунд уже сгенерирован. Обновите страницу.'
+  }
+  if (e?.status == null && err instanceof Error) return err.message
+  return e?.problem?.detail ?? fallback
+}
 
 const TEST_BTN: React.CSSProperties = {
   fontSize: '0.8em', color: '#999', background: 'none',
@@ -91,12 +108,19 @@ export default function TournamentDetailPage() {
     enabled: !!id,
   })
 
+  // Ячейки сетки: какая встреча стоит в `(фаза, раунд, слот)` (B-5). Резолв идёт
+  // по ним, а не по паре участников. Пустой список = турнир, созданный до
+  // размещений: рисуется и генерируется по-старому (инвариант 46). Источник —
+  // сами встречи, поэтому отдельной инвалидации размещения не требуют.
+  const placements = useMemo(() => placementsOf(tournamentMatches), [tournamentMatches])
+
   const statusMut = useMutation({
     mutationFn: (status: TournamentStatus) => tournamentsApi.setStatus(id!, status),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
       qc.invalidateQueries({ queryKey: ['tournaments'] })
-      // Rollback to Draft deletes generated fights server-side.
+      // Rollback to Draft deletes generated fights server-side — а с ними
+      // каскадом уходят и их ячейки сетки (инвариант 44).
       qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
       qc.invalidateQueries({ queryKey: ['encounters', id] })
     },
@@ -169,6 +193,8 @@ export default function TournamentDetailPage() {
       return matchesApi.generateRoundRobin(id!, phaseId)
     },
     onSuccess: (result) => {
+      // generate-round-robin размещает групповые встречи по ячейкам (группа, пара);
+      // размещения приезжают внутри самих встреч.
       qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
       qc.invalidateQueries({ queryKey: ['encounters', id] })
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
@@ -194,54 +220,78 @@ export default function TournamentDetailPage() {
       const fromPhaseId: string = p.seeding?.from
       const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)!
       const groupAssignments = resolvePhaseGroups(rrPhase as any, tournament!.participants, savedGroups)
-      const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, tournamentMatches ?? [])
+      const allTournamentMatches = tournamentMatches ?? []
+      // Таблица группы считается только по встречам, размещённым в групповой
+      // фазе: переигровка одногруппников в плейофф не должна двигать посев
+      // задним числом (Д-3).
+      const groupStandings = calculateGroupStandings(
+        rrPhase, groupAssignments, matchesOfPhase(rrPhase.id, allTournamentMatches, placements))
       const slots = resolvePlayoffSlots(sePhase, groupStandings)
 
       if (slots.some(s => s === null)) {
         throw new Error('Не удалось определить всех участников плейофф. Убедитесь, что все бои группового этапа завершены.')
       }
 
-      const allTournamentMatches = tournamentMatches ?? []
-      const findMatch = (f1: string, f2: string) =>
-        allTournamentMatches.find(m =>
-          (m.fighter1Id === f1 && m.fighter2Id === f2) ||
-          (m.fighter1Id === f2 && m.fighter2Id === f1)
-        )
+      // Встреча раунда ищется по ячейке `(фаза, раунд, слот)`, а не по паре:
+      // те же двое могли сойтись в группе и снова сходятся в плейофф (Д-1, Д-2).
+      const lookup = createCellLookup(phaseId, allTournamentMatches, placements)
+      const rounds = seRounds(sePhase)
 
       const has3rdPlace: boolean = !!p.thirdPlaceMatch
+      const loserOf = (m: Match | undefined): string | null => {
+        if (!m?.winnerId) return null
+        return (m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id) ?? null
+      }
 
       // Walk rounds until we find the next one to generate
       let currentSlots = slots as string[]
-      let prevPairMatches: ReturnType<typeof findMatch>[] = []
+      let prevPairMatches: (Match | undefined)[] = []
+      let ri = 0
 
       while (currentSlots.length >= 2) {
+        const round = rounds[ri]
+        if (!round) {
+          throw new Error('В формате не описан раунд для этой стадии сетки — проверьте список rounds в YAML.')
+        }
+
         const pairs: [string, string][] = []
         for (let i = 0; i + 1 < currentSlots.length; i += 2) {
           pairs.push([currentSlots[i], currentSlots[i + 1]])
         }
 
         const isFinalRound = currentSlots.length === 2
-        const pairMatches = pairs.map(([f1, f2]) => findMatch(f1, f2))
+        const pairMatches = pairs.map(([f1, f2], i) => lookup.find(round.id, i, f1, f2))
 
         // Collect what needs to be created this iteration
-        const creates: Array<[string, string]> = []
+        const creates: CreateMatchRequest[] = []
         for (let i = 0; i < pairs.length; i++) {
-          if (!pairMatches[i]) creates.push(pairs[i])
+          if (!pairMatches[i]) {
+            creates.push({
+              fighter1Id: pairs[i][0],
+              fighter2Id: pairs[i][1],
+              placement: { phaseId, roundId: round.id, slotIndex: i },
+            })
+          }
         }
 
-        // 3rd place match: generate alongside the final from semi-final losers
+        // 3rd place match: generate alongside the final from semi-final losers.
+        // Своя ячейка `thirdPlace` — системный раунд формата v0.3.1 (ОВ-4).
+        const semiFinalLosers = (): [string | null, string | null] =>
+          [loserOf(prevPairMatches[0]), loserOf(prevPairMatches[1])]
+
         if (isFinalRound && has3rdPlace && prevPairMatches.length >= 2) {
-          const losers = prevPairMatches.slice(0, 2).map(m => {
-            if (!m?.winnerId) return null
-            return m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id
-          })
-          if (losers[0] && losers[1] && !findMatch(losers[0], losers[1])) {
-            creates.push([losers[0], losers[1]])
+          const [l1, l2] = semiFinalLosers()
+          if (l1 && l2 && !lookup.find(THIRD_PLACE_ROUND_ID, 0, l1, l2)) {
+            creates.push({
+              fighter1Id: l1,
+              fighter2Id: l2,
+              placement: { phaseId, roundId: THIRD_PLACE_ROUND_ID, slotIndex: 0 },
+            })
           }
         }
 
         if (creates.length > 0) {
-          return Promise.all(creates.map(([f1, f2]) => matchesApi.create(id!, { fighter1Id: f1, fighter2Id: f2 })))
+          return Promise.all(creates.map(req => matchesApi.create(id!, req)))
         }
 
         const incomplete = pairMatches.filter(m => m && m.status !== 'Completed').length
@@ -252,12 +302,9 @@ export default function TournamentDetailPage() {
         if (isFinalRound) {
           // Check 3rd place match completion if applicable
           if (has3rdPlace && prevPairMatches.length >= 2) {
-            const losers = prevPairMatches.slice(0, 2).map(m => {
-              if (!m?.winnerId) return null
-              return m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id
-            })
-            if (losers[0] && losers[1]) {
-              const thirdMatch = findMatch(losers[0], losers[1])
+            const [l1, l2] = semiFinalLosers()
+            if (l1 && l2) {
+              const thirdMatch = lookup.find(THIRD_PLACE_ROUND_ID, 0, l1, l2)
               if (thirdMatch && thirdMatch.status !== 'Completed') {
                 throw new Error('Финал завершён, но матч за 3-е место ещё не сыгран.')
               }
@@ -273,6 +320,7 @@ export default function TournamentDetailPage() {
         }
         prevPairMatches = pairMatches
         currentSlots = winners as string[]
+        ri++
       }
 
       throw new Error('Плейофф уже полностью сыгран.')
@@ -282,17 +330,17 @@ export default function TournamentDetailPage() {
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
       alert(`Создано встреч: ${results.length}`)
     },
-    onError: (err: unknown) => {
-      const msg = err instanceof Error
-        ? err.message
-        : ((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка генерации плейофф')
-      alert(msg)
-    },
+    onError: (err: unknown) => alert(generationError(err, 'Ошибка генерации плейофф')),
   })
 
   // Team single-elimination playoff: mirrors generatePlayoffMut but resolves
   // standings from Encounters and creates Encounters (+ bouts) per pair, advancing
   // by winnerParticipantId. Generates the next not-yet-created round on each click.
+  //
+  // Размещений (B-5) здесь нет: бэкенд размещает только `Match`, а серия — это
+  // `Encounter`. Командный плейофф остаётся на резолве по паре со всеми его
+  // ограничениями (переигровка одногруппников не создастся) — размещение серий
+  // требует решения на бэке и в этот скоуп не входит.
   const generateTeamPlayoffMut = useMutation({
     mutationFn: async (phaseId: string) => {
       const sePhase = format!.phases.find(p => p.id === phaseId)!
@@ -404,7 +452,9 @@ export default function TournamentDetailPage() {
       if (!rrPhase) throw new Error(`Фаза '${fromPhaseId}' не найдена.`)
 
       const groupAssignments = resolvePhaseGroups(rrPhase as any, tournament!.participants, savedGroups)
-      const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, tournamentMatches ?? [])
+      const allTMs = tournamentMatches ?? []
+      const groupStandings = calculateGroupStandings(
+        rrPhase, groupAssignments, matchesOfPhase(rrPhase.id, allTMs, placements))
 
       const resolveSlot = (source: string, rank: number): string | null => {
         const parts = source.split('.')
@@ -413,18 +463,16 @@ export default function TournamentDetailPage() {
         return groupStandings[groupIdx]?.[rank - 1]?.fighterId ?? null
       }
 
-      const allTMs = tournamentMatches ?? []
-      const findMatch = (f1: string, f2: string) =>
-        allTMs.find(m =>
-          (m.fighter1Id === f1 && m.fighter2Id === f2) ||
-          (m.fighter1Id === f2 && m.fighter2Id === f1)
-        )
-      const matchWinner = (f1: string, f2: string): string | null => {
-        const m = findMatch(f1, f2)
+      // В DE переигровки штатны: одногруппники сходятся в UB и LB, а гранд-финал
+      // и матч-сброс — это вообще одна пара подряд. Поэтому встреча ищется строго
+      // по ячейке `(фаза, раунд, слот)`; пара осталась подписью (B-5).
+      const lookup = createCellLookup(phaseId, allTMs, placements)
+      const matchWinner = (roundId: string, slot: number, f1: string, f2: string): string | null => {
+        const m = lookup.find(roundId, slot, f1, f2)
         return m?.status === 'Completed' && m.winnerId ? m.winnerId : null
       }
-      const matchLoser = (f1: string, f2: string): string | null => {
-        const m = findMatch(f1, f2)
+      const matchLoser = (roundId: string, slot: number, f1: string, f2: string): string | null => {
+        const m = lookup.find(roundId, slot, f1, f2)
         if (m?.status === 'Completed' && m.winnerId)
           return (m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id) ?? null
         return null
@@ -451,7 +499,8 @@ export default function TournamentDetailPage() {
 
         for (let ri = 1; ri < ubRounds.length; ri++) {
           const byes = ubByesByRound[ubRounds[ri].id] ?? []
-          const prevWinners = ubRoundPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
+          const prevWinners = ubRoundPairs[ri - 1].map(([f1, f2], i) =>
+            (f1 && f2) ? matchWinner(ubRounds[ri - 1].id, i, f1, f2) : null)
           let pairs: Pair[]
           if (byes.length > 0) {
             pairs = prevWinners.map((w, i) => [w, byes[i] ?? null] as Pair)
@@ -474,13 +523,15 @@ export default function TournamentDetailPage() {
 
         for (let ri = 1; ri < lbRounds.length; ri++) {
           const round = lbRounds[ri]
-          const prevWinners = lbRoundPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
+          const prevWinners = lbRoundPairs[ri - 1].map(([f1, f2], i) =>
+            (f1 && f2) ? matchWinner(lbRounds[ri - 1].id, i, f1, f2) : null)
           let slotsForRound: (string | null)[] = [...prevWinners]
 
           if (round.dropdownsFrom) {
             const ubRi = ubRounds.findIndex(r => r.id === round.dropdownsFrom)
             if (ubRi >= 0) {
-              const losers = ubRoundPairs[ubRi].map(([f1, f2]) => (f1 && f2) ? matchLoser(f1, f2) : null)
+              const losers = ubRoundPairs[ubRi].map(([f1, f2], i) =>
+                (f1 && f2) ? matchLoser(ubRounds[ubRi].id, i, f1, f2) : null)
               slotsForRound = []
               for (let i = 0; i < prevWinners.length; i++) {
                 slotsForRound.push(prevWinners[i])
@@ -496,81 +547,124 @@ export default function TournamentDetailPage() {
         }
       }
 
-      // Helpers
-      const isComplete = (pairs: Pair[]): boolean =>
-        pairs.every(([f1, f2]) => !!(f1 && f2 && findMatch(f1, f2)?.status === 'Completed'))
-      const hasUnfinished = (pairs: Pair[]): boolean =>
-        pairs.some(([f1, f2]) => {
-          if (!f1 || !f2) return false
-          const m = findMatch(f1, f2)
+      // Helpers. Раунд адресуется своим id, ячейка — индексом пары в раунде.
+      const isComplete = (pairs: Pair[], roundId: string): boolean =>
+        pairs.every(([f1, f2], i) => lookup.find(roundId, i, f1, f2)?.status === 'Completed')
+      const hasUnfinished = (pairs: Pair[], roundId: string): boolean =>
+        pairs.some(([f1, f2], i) => {
+          const m = lookup.find(roundId, i, f1, f2)
           return !!(m && m.status !== 'Completed')
         })
 
-      const creates: Array<[string, string]> = []
-      const generateRound = (pairs: Pair[]): boolean => {
+      const creates: CreateMatchRequest[] = []
+      const generateRound = (pairs: Pair[], roundId: string): boolean => {
         let made = false
-        for (const [f1, f2] of pairs) {
-          if (!f1 || !f2) continue
-          if (!findMatch(f1, f2)) { creates.push([f1, f2]); made = true }
-        }
+        pairs.forEach(([f1, f2], i) => {
+          if (!f1 || !f2) return
+          if (!lookup.find(roundId, i, f1, f2)) {
+            creates.push({
+              fighter1Id: f1,
+              fighter2Id: f2,
+              placement: { phaseId, roundId, slotIndex: i },
+            })
+            made = true
+          }
+        })
         return made
       }
 
       // Walk UB: generate the next round that can be generated
       for (let ri = 0; ri < ubRoundPairs.length; ri++) {
-        if (ri > 0 && !isComplete(ubRoundPairs[ri - 1])) break
-        if (generateRound(ubRoundPairs[ri])) break
-        if (hasUnfinished(ubRoundPairs[ri])) break
+        if (ri > 0 && !isComplete(ubRoundPairs[ri - 1], ubRounds[ri - 1].id)) break
+        if (generateRound(ubRoundPairs[ri], ubRounds[ri].id)) break
+        if (hasUnfinished(ubRoundPairs[ri], ubRounds[ri].id)) break
       }
 
       // Walk LB: same logic, also wait for dropdown source in UB to complete
       for (let ri = 0; ri < lbRoundPairs.length; ri++) {
-        if (ri > 0 && !isComplete(lbRoundPairs[ri - 1])) break
+        if (ri > 0 && !isComplete(lbRoundPairs[ri - 1], lbRounds[ri - 1].id)) break
         const dropFrom = lbRounds[ri]?.dropdownsFrom
         if (dropFrom) {
           const ubRi = ubRounds.findIndex(r => r.id === dropFrom)
-          if (ubRi >= 0 && !isComplete(ubRoundPairs[ubRi])) break
+          if (ubRi >= 0 && !isComplete(ubRoundPairs[ubRi], ubRounds[ubRi].id)) break
         }
-        if (generateRound(lbRoundPairs[ri])) break
-        if (hasUnfinished(lbRoundPairs[ri])) break
+        if (generateRound(lbRoundPairs[ri], lbRounds[ri].id)) break
+        if (hasUnfinished(lbRoundPairs[ri], lbRounds[ri].id)) break
       }
 
       // Grand Final: after both bracket finals are complete
+      const ubFinalId = ubRounds[ubRounds.length - 1]?.id
+      const lbFinalId = lbRounds[lbRounds.length - 1]?.id
       const ubFP = ubRoundPairs[ubRoundPairs.length - 1]
       const lbFP = lbRoundPairs[lbRoundPairs.length - 1]
-      if (ubFP && lbFP && isComplete(ubFP) && isComplete(lbFP)) {
-        const ubW = ubFP[0] ? matchWinner(ubFP[0][0]!, ubFP[0][1]!) : null
-        const lbW = lbFP[0] ? matchWinner(lbFP[0][0]!, lbFP[0][1]!) : null
-        if (ubW && lbW && !findMatch(ubW, lbW)) creates.push([ubW, lbW])
+      if (ubFP && lbFP && ubFinalId && lbFinalId
+          && isComplete(ubFP, ubFinalId) && isComplete(lbFP, lbFinalId)) {
+        const ubW = ubFP[0] ? matchWinner(ubFinalId, 0, ubFP[0][0]!, ubFP[0][1]!) : null
+        const lbW = lbFP[0] ? matchWinner(lbFinalId, 0, lbFP[0][0]!, lbFP[0][1]!) : null
+        if (ubW && lbW) {
+          const gf = lookup.find(GRAND_FINAL_ROUND_ID, 0, ubW, lbW)
+          if (!gf) {
+            creates.push({
+              fighter1Id: ubW,
+              fighter2Id: lbW,
+              placement: { phaseId, roundId: GRAND_FINAL_ROUND_ID, slotIndex: 0 },
+            })
+          } else if (
+            // Матч-сброс: та же пара сразу после гранд-финала — без ячеек его
+            // было не отличить от самого гранд-финала (инвариант 39). Поэтому
+            // создаём его только в размещённой фазе; старый турнир такой сетки
+            // не различает и остаётся без матча-сброса.
+            lookup.placed
+            && (dePhase.grandFinal === 'reset' || dePhase.grandFinal === 'advantage')
+            && gf.status === 'Completed' && gf.winnerId === lbW
+            && !lookup.at(GRAND_FINAL_RESET_ROUND_ID, 0)
+          ) {
+            creates.push({
+              fighter1Id: ubW,
+              fighter2Id: lbW,
+              placement: { phaseId, roundId: GRAND_FINAL_RESET_ROUND_ID, slotIndex: 0 },
+            })
+          }
+        }
       }
 
       if (creates.length === 0)
         throw new Error('Нет встреч для генерации. Завершите текущие бои, чтобы сформировать следующий раунд.')
 
-      return Promise.all(creates.map(([f1, f2]) => matchesApi.create(id!, { fighter1Id: f1, fighter2Id: f2 })))
+      return Promise.all(creates.map(req => matchesApi.create(id!, req)))
     },
     onSuccess: (results) => {
       qc.invalidateQueries({ queryKey: ['tournament-matches', id] })
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
       alert(`Создано встреч: ${results.length}`)
     },
-    onError: (err: unknown) => {
-      const msg = err instanceof Error
-        ? err.message
-        : ((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка генерации DE плейофф')
-      alert(msg)
-    },
+    onError: (err: unknown) => alert(generationError(err, 'Ошибка генерации DE плейофф')),
   })
 
   const generateSwissMut = useMutation({
     mutationFn: async (phaseId: string) => {
       const phase = format!.phases.find(p => p.id === phaseId)! as any
       const pool = buildSwissPool(tournament!.participants)
-      const standings = calculateGroupStandings(phase, [pool], tournamentMatches ?? [])[0]
-      const plan = planSwissNextRound(pool, phase, standings, tournamentMatches ?? [])
-      const creates = plan.pairs.map(([f1, f2]) => matchesApi.create(id!, { fighter1Id: f1, fighter2Id: f2 }))
-      // Bye (odd pool): no opponent — backend auto-completes as a win for the bye fighter.
-      if (plan.bye) creates.push(matchesApi.create(id!, { fighter1Id: plan.bye }))
+      // Только встречи самой швейцарки: чужие фазы не должны попадать ни в
+      // таблицу, ни в подсчёт сыгранных туров.
+      const phaseMatches = matchesOfPhase(phaseId, tournamentMatches ?? [], placements)
+      const standings = calculateGroupStandings(phase, [pool], phaseMatches)[0]
+      const plan = planSwissNextRound(pool, phase, standings, phaseMatches)
+
+      // `round1..roundN` — системные id туров швейцарки (docs/08 §6). Режим
+      // qualification planSwissNextRound не поддерживает и уже бросил бы ошибку.
+      const roundId = `round${plan.roundNumber}`
+      const creates = plan.pairs.map(([f1, f2], i) => matchesApi.create(id!, {
+        fighter1Id: f1,
+        fighter2Id: f2,
+        placement: { phaseId, roundId, slotIndex: i },
+      }))
+      // Bye (odd pool): no opponent — backend auto-completes as a win for the bye
+      // fighter. Ячейка байа идёт следом за парами тура.
+      if (plan.bye) creates.push(matchesApi.create(id!, {
+        fighter1Id: plan.bye,
+        placement: { phaseId, roundId, slotIndex: plan.pairs.length },
+      }))
       const results = await Promise.all(creates)
       return { roundNumber: plan.roundNumber, count: results.length, hasBye: !!plan.bye }
     },
@@ -579,12 +673,7 @@ export default function TournamentDetailPage() {
       qc.invalidateQueries({ queryKey: ['tournaments', id] })
       alert(`Тур ${roundNumber}: создано встреч ${count}${hasBye ? ' (включая бай)' : ''}`)
     },
-    onError: (err: unknown) => {
-      const msg = err instanceof Error
-        ? err.message
-        : ((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка генерации тура швейцарки')
-      alert(msg)
-    },
+    onError: (err: unknown) => alert(generationError(err, 'Ошибка генерации тура швейцарки')),
   })
 
   const addRandomFightersMut = useMutation({
@@ -771,6 +860,7 @@ export default function TournamentDetailPage() {
         defaultFightDurationSeconds={tournament.defaultRoundDurationSeconds}
         allMatches={tournamentMatches}
         encounters={tournamentEncounters}
+        placements={placements}
         groupsGenerating={generateMut.isPending}
         generateGroupsLabel={isTeam ? 'Сформировать встречи группового этапа' : 'Сформировать бои группового этапа'}
         onGenerateGroups={(phaseId, groups) => generateMut.mutate({ phaseId, groups })}
