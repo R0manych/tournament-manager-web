@@ -1,6 +1,17 @@
 import { api } from './client'
 import type { Tournament, TournamentFormat, TournamentStatus, CreateTournamentRequest, UpdateTournamentRequest } from './types'
 
+// A forced write goes through while the tournament is out of Draft and discards the
+// saved group compositions the new format no longer describes (all of them on delete).
+// How many were dropped comes back in X-Groups-Cleared, not in the body — see B-2.
+export interface FormatWriteResult<T> {
+  data: T
+  groupsCleared: number
+}
+
+const groupsCleared = (headers: Headers) => Number(headers.get('X-Groups-Cleared') ?? 0)
+const forceQuery = (force: boolean) => (force ? '?force=true' : '')
+
 export const tournamentsApi = {
   list: () => api.get<Tournament[]>('/tournaments'),
   get: (id: string) => api.get<Tournament>(`/tournaments/${id}`),
@@ -16,10 +27,14 @@ export const tournamentsApi = {
 
   format: {
     get: (id: string) => api.get<TournamentFormat>(`/tournaments/${id}/format`),
-    upload: (id: string, file: File) => {
+    upload: async (id: string, file: File, force = false): Promise<FormatWriteResult<TournamentFormat>> => {
       const form = new FormData()
       form.append('file', file)
-      return api.putForm<TournamentFormat>(`/tournaments/${id}/format`, form)
+      const res = await api.putFormWithMeta<TournamentFormat>(
+        `/tournaments/${id}/format${forceQuery(force)}`,
+        form,
+      )
+      return { data: res.data, groupsCleared: groupsCleared(res.headers) }
     },
     downloadRaw: async (id: string, fileName: string) => {
       const res = await api.getRaw(`/tournaments/${id}/format/raw`)
@@ -31,6 +46,9 @@ export const tournamentsApi = {
       a.click()
       URL.revokeObjectURL(url)
     },
-    delete: (id: string) => api.delete(`/tournaments/${id}/format`),
+    delete: async (id: string, force = false): Promise<FormatWriteResult<void>> => {
+      const res = await api.deleteWithMeta(`/tournaments/${id}/format${forceQuery(force)}`)
+      return { data: undefined, groupsCleared: groupsCleared(res.headers) }
+    },
   },
 }
