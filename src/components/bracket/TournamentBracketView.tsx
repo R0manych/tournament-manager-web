@@ -1,8 +1,9 @@
-import type { Encounter, Match, TournamentFormat, TournamentParticipant } from '../../api/types'
+import type { Encounter, Match, MatchPlacement, TournamentFormat, TournamentParticipant } from '../../api/types'
 import type { SaveGroupItem, TournamentGroup } from '../../api/groups'
 import {
   assignGroupsFromExplicitSeeding, buildSwissPool, resolvePhaseGroups,
   buildBracketRounds, calculateGroupStandings, encountersToStandingsMatches,
+  hasPhasePlacements, matchesOfPhase,
   resolvePlayoffSlots, resolveDERoundPairs,
   type PhaseStandingsCache,
 } from './bracketUtils'
@@ -19,6 +20,8 @@ interface Props {
   allMatches?: Match[]
   encounters?: Encounter[]
   savedGroups?: TournamentGroup[]
+  // Размещения встреч в ячейках сетки (B-5): резолв идёт по ним, а не по паре.
+  placements?: MatchPlacement[]
   // Group editing (snake-seeded RR phases, tournament in Draft): the panel's
   // single action persists the composition and generates the group-stage fights.
   groupsEditable?: boolean
@@ -29,7 +32,7 @@ interface Props {
 }
 
 export default function TournamentBracketView({
-  format, participants, fightDurationSeconds, allMatches, encounters, savedGroups,
+  format, participants, fightDurationSeconds, allMatches, encounters, savedGroups, placements,
   groupsEditable, groupsGenerating, groupsLockedNote, generateGroupsLabel, onGenerateGroups,
 }: Props) {
   const displayDuration = fightDurationSeconds ?? format.defaults?.roundDurationSeconds
@@ -48,8 +51,10 @@ export default function TournamentBracketView({
     const assignments = p.seeding?.groups
       ? assignGroupsFromExplicitSeeding(phase as any, standingsCache)
       : resolvePhaseGroups(phase as any, participants, savedGroups)
+    // Только встречи, размещённые в этой фазе: переигровка одногруппников в
+    // плейофф не должна задним числом двигать групповую таблицу (Д-3).
     const standings = standingsSource
-      ? calculateGroupStandings(phase, assignments, standingsSource)
+      ? calculateGroupStandings(phase, assignments, matchesOfPhase(phase.id, standingsSource, placements))
       : assignments.map(() => [])
     standingsCache.set(phase.id, { assignments, standings })
   }
@@ -114,7 +119,9 @@ export default function TournamentBracketView({
             const cached = standingsCache.get(p.seeding.from as string)
             if (cached) {
               const candidateIds = resolvePlayoffSlots(phase as any, cached.standings)
-              const hasPlayoffMatches = candidateIds.some((id, i) => {
+              // Размещённая фаза говорит о себе сама; для старых турниров
+              // остаётся прежняя проверка «есть встреча этой пары».
+              const hasPlayoffMatches = hasPhasePlacements(phase.id, placements) || candidateIds.some((id, i) => {
                 if (i % 2 !== 0) return false
                 const f1 = id, f2 = candidateIds[i + 1]
                 if (!f1 || !f2) return false
@@ -126,7 +133,7 @@ export default function TournamentBracketView({
               if (hasPlayoffMatches) resolvedIds = candidateIds
             }
           }
-          const rounds = buildBracketRounds(phase as any, resolvedIds, participants, standingsSource)
+          const rounds = buildBracketRounds(phase as any, resolvedIds, participants, standingsSource, placements)
           return (
             <SingleEliminationView
               key={phase.id}
@@ -143,7 +150,7 @@ export default function TournamentBracketView({
           const sp = phase as unknown as SwissPhaseData
           const pool = buildSwissPool(participants)
           const standings = allMatches
-            ? calculateGroupStandings(phase, [pool], allMatches)[0]
+            ? calculateGroupStandings(phase, [pool], matchesOfPhase(phase.id, allMatches, placements))[0]
             : undefined
           return (
             <SwissPhaseView
@@ -165,7 +172,7 @@ export default function TournamentBracketView({
             if (fromPhaseId) {
               const cached = standingsCache.get(fromPhaseId)
               if (cached) {
-                const resolved = resolveDERoundPairs(dePhase, cached.standings, allMatches)
+                const resolved = resolveDERoundPairs(dePhase, cached.standings, allMatches, placements)
                 ubPairs = resolved.ubPairs
                 lbPairs = resolved.lbPairs
               }

@@ -226,6 +226,11 @@ export default function MatchPage() {
       // Immediately put server response into cache — no wait for refetch.
       // This ensures FightTimer sees startedAt right away when going InProgress.
       qc.setQueryData(['matches', id], updated)
+      // Отмена встречи освобождает её ячейку сетки (инвариант 44) — сетка на
+      // странице турнира обязана увидеть, что ячейка опустела.
+      if (updated.status === 'Cancelled') {
+        qc.invalidateQueries({ queryKey: ['tournament-matches', updated.tournamentId] })
+      }
       if (updated.status === 'InProgress') {
         // Re-arm the client-side timer on every (re)start — including reopening a
         // completed bout via «Вернуть в бой». Fold all time already elapsed since

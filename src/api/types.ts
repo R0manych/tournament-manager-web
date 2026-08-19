@@ -94,6 +94,21 @@ export interface Exchange {
   createdAt: string
 }
 
+// ── Bracket placement (B-5, docs/08) ────────────────────────────────────────
+// Which cell of the format a match occupies. The pair of participants is no
+// longer an identifier: the same two can meet again in the playoff, in the LB,
+// in the grand final and in its reset. A cell holds at most one match and a
+// match stands in at most one cell (инвариант 43).
+export interface MatchPlacementRef {
+  phaseId: string
+  roundId: string    // rounds[].id, системный id SE, grandFinal(Reset), round{N} swiss, метка группы RR
+  slotIndex: number  // >= 0, номер ячейки внутри раунда (сверху вниз)
+}
+
+export interface MatchPlacement extends MatchPlacementRef {
+  matchId: string
+}
+
 export interface Match {
   id: string
   tournamentId: string
@@ -123,6 +138,9 @@ export interface Match {
   endedAt?: string
   createdAt: string
   exchanges: Exchange[]
+  // Ячейка сетки, если встреча в ней стоит. Отсутствует у ручных встреч и у
+  // турниров, созданных до размещений (инвариант 46).
+  placement?: MatchPlacement
 }
 
 // ── Teams (team tournaments only) ───────────────────────────────────────────
@@ -229,6 +247,9 @@ export interface CreateMatchRequest {
   roundDurationSeconds?: number
   maxDoubles?: number
   maxWarnings?: number
+  // Ячейка сетки. Занятая ячейка → 409: на этом держится идемпотентность
+  // генерации плейофф (docs/08 §8).
+  placement?: MatchPlacementRef
 }
 
 export interface AddExchangeRequest {

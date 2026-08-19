@@ -2,14 +2,17 @@ import { api } from './client'
 import type { Tournament, TournamentFormat, TournamentStatus, CreateTournamentRequest, UpdateTournamentRequest } from './types'
 
 // A forced write goes through while the tournament is out of Draft and discards the
-// saved group compositions the new format no longer describes (all of them on delete).
-// How many were dropped comes back in X-Groups-Cleared, not in the body — see B-2.
+// saved group compositions the new format no longer describes (all of them on delete),
+// together with the bracket placements of those phases (инвариант 45). How many were
+// dropped comes back in X-Groups-Cleared / X-Placements-Cleared, not in the body —
+// see B-2 and docs/08.
 export interface FormatWriteResult<T> {
   data: T
   groupsCleared: number
+  placementsCleared: number
 }
 
-const groupsCleared = (headers: Headers) => Number(headers.get('X-Groups-Cleared') ?? 0)
+const headerCount = (headers: Headers, name: string) => Number(headers.get(name) ?? 0)
 const forceQuery = (force: boolean) => (force ? '?force=true' : '')
 
 export const tournamentsApi = {
@@ -34,7 +37,11 @@ export const tournamentsApi = {
         `/tournaments/${id}/format${forceQuery(force)}`,
         form,
       )
-      return { data: res.data, groupsCleared: groupsCleared(res.headers) }
+      return {
+        data: res.data,
+        groupsCleared: headerCount(res.headers, 'X-Groups-Cleared'),
+        placementsCleared: headerCount(res.headers, 'X-Placements-Cleared'),
+      }
     },
     downloadRaw: async (id: string, fileName: string) => {
       const res = await api.getRaw(`/tournaments/${id}/format/raw`)
@@ -48,7 +55,11 @@ export const tournamentsApi = {
     },
     delete: async (id: string, force = false): Promise<FormatWriteResult<void>> => {
       const res = await api.deleteWithMeta(`/tournaments/${id}/format${forceQuery(force)}`)
-      return { data: undefined, groupsCleared: groupsCleared(res.headers) }
+      return {
+        data: undefined,
+        groupsCleared: headerCount(res.headers, 'X-Groups-Cleared'),
+        placementsCleared: headerCount(res.headers, 'X-Placements-Cleared'),
+      }
     },
   },
 }

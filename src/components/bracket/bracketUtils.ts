@@ -1,6 +1,108 @@
-import type { TournamentFormat, TournamentParticipant, Match, Encounter } from '../../api/types'
+import type { TournamentFormat, TournamentParticipant, Match, Encounter, MatchPlacement } from '../../api/types'
 import { participantName } from '../../api/types'
 import type { TournamentGroup } from '../../api/groups'
+
+// ── Ячейки сетки (B-5, docs/08) ────────────────────────────────────────────
+// Встреча резолвится по ячейке `(phaseId, roundId, slotIndex)`, а не по паре
+// участников: одна и та же пара может сойтись в группе и в плейофф, в UB и в
+// LB, в гранд-финале и в матче-сбросе. Пара осталась только подписью.
+//
+// Откат на резолв по паре сохранён для турниров, созданных до размещений
+// (инвариант 46), но ограничен встречами, которые не стоят ни в одной ячейке:
+// размещённая встреча принадлежит своей ячейке и не может быть подставлена в
+// чужую (дефект Д-2). Это же делает безопасной смешанную ситуацию, когда
+// размещения появляются у турнира, часть встреч которого создана раньше.
+
+export const THIRD_PLACE_ROUND_ID = 'thirdPlace'
+export const GRAND_FINAL_ROUND_ID = 'grandFinal'
+export const GRAND_FINAL_RESET_ROUND_ID = 'grandFinalReset'
+
+// Ключ ячейки через JSON, а не склейкой разделителем: `roundId` группового
+// этапа — это метка группы, свободный текст организатора.
+const cellKey = (roundId: string, slotIndex: number) => JSON.stringify([roundId, slotIndex])
+
+export interface PlaceableMatch {
+  id: string
+  fighter1Id: string
+  fighter2Id?: string
+}
+
+export interface PhaseCellLookup<M> {
+  /** true — в фазе занята хотя бы одна ячейка; иначе фаза живёт на резолве по паре. */
+  placed: boolean
+  /** Встреча ячейки; undefined, если ячейка пуста. */
+  at: (roundId: string, slotIndex: number) => M | undefined
+  /** Ячейка, а если она пуста — неразмещённая встреча этой пары (legacy). */
+  find: (
+    roundId: string,
+    slotIndex: number,
+    f1: string | null | undefined,
+    f2: string | null | undefined,
+  ) => M | undefined
+}
+
+export function createCellLookup<M extends PlaceableMatch>(
+  phaseId: string,
+  matches: M[] | undefined,
+  placements: MatchPlacement[] | undefined,
+): PhaseCellLookup<M> {
+  const all = matches ?? []
+  const byId = new Map(all.map(m => [m.id, m]))
+  const placedIds = new Set((placements ?? []).map(pl => pl.matchId))
+
+  const cells = new Map<string, M>()
+  for (const pl of placements ?? []) {
+    if (pl.phaseId !== phaseId) continue
+    const m = byId.get(pl.matchId)
+    if (m) cells.set(cellKey(pl.roundId, pl.slotIndex), m)
+  }
+
+  const at = (roundId: string, slotIndex: number) => cells.get(cellKey(roundId, slotIndex))
+
+  const byPair = (f1: string, f2: string) =>
+    all.find(m =>
+      !placedIds.has(m.id) &&
+      ((m.fighter1Id === f1 && m.fighter2Id === f2) ||
+       (m.fighter1Id === f2 && m.fighter2Id === f1)),
+    )
+
+  return {
+    placed: cells.size > 0,
+    at,
+    find: (roundId, slotIndex, f1, f2) =>
+      at(roundId, slotIndex) ?? (f1 && f2 ? byPair(f1, f2) : undefined),
+  }
+}
+
+// Размещение приезжает внутри самой встречи (`MatchResponse.placement`), поэтому
+// отдельный `GET /placements` фронту не нужен: один источник — один кэш, и
+// размещения не могут разъехаться со списком встреч между инвалидациями.
+// Эндпоинт остаётся в `placementsApi` для тех, кому нужна только раскладка.
+export function placementsOf(matches: Match[] | undefined): MatchPlacement[] {
+  return (matches ?? [])
+    .map(m => m.placement)
+    .filter((pl): pl is MatchPlacement => pl != null)
+}
+
+export function hasPhasePlacements(phaseId: string, placements: MatchPlacement[] | undefined): boolean {
+  return (placements ?? []).some(pl => pl.phaseId === phaseId)
+}
+
+// Встречи фазы: размещённые в ней плюс те, что не стоят ни в одной ячейке.
+// Этим чинится Д-3 — переигровка одногруппников в плейофф размещена в фазе
+// плейофф и больше не попадает в групповую таблицу, — и при этом турниры без
+// размещений (и встречи, заведённые вручную) считаются как раньше.
+export function matchesOfPhase<M extends { id: string }>(
+  phaseId: string,
+  matches: M[],
+  placements: MatchPlacement[] | undefined,
+): M[] {
+  const all = placements ?? []
+  if (all.length === 0) return matches
+  const inPhase = new Set(all.filter(pl => pl.phaseId === phaseId).map(pl => pl.matchId))
+  const placedAnywhere = new Set(all.map(pl => pl.matchId))
+  return matches.filter(m => inPhase.has(m.id) || !placedAnywhere.has(m.id))
+}
 
 // NOTE: `fighterId` here is an opaque participant id — a Fighter.Id in singles
 // tournaments and a Team.Id in team tournaments. The name is kept for minimal
@@ -393,16 +495,30 @@ function getSystemRounds(slotCount: number): Array<{ id: string; name: string }>
   }
 }
 
+// Раунды фазы singleElimination в порядке сетки: явные из YAML либо системные
+// по числу слотов. Тот же список даёт `roundId` для размещений — мирроринг
+// FormatRoundCatalog.SingleEliminationRoundIds на бэке.
+interface SEPhaseShape {
+  seeding?: { slots?: Array<{ source: string; rank: number }> }
+  rounds?: Array<{ id: string; name: string }>
+}
+
+export function seRounds(phase: TournamentFormat['phases'][0]): Array<{ id: string; name: string }> {
+  const p = phase as unknown as SEPhaseShape
+  const slots = p.seeding?.slots ?? []
+  return (p.rounds && p.rounds.length > 0) ? p.rounds : getSystemRounds(slots.length)
+}
+
 export function buildBracketRounds(
   phase: TournamentFormat['phases'][0] & { type: 'singleElimination' },
   resolvedIds?: (string | null)[],
   participants?: TournamentParticipant[],
   allMatches?: StandingsMatch[],   // singles Matches or mapped team Encounters
+  placements?: MatchPlacement[],
 ): BracketRoundData[] {
   const p = phase as any
   const slots: Array<{ source: string; rank: number }> = p.seeding?.slots ?? []
-  const rounds: Array<{ id: string; name: string }> =
-    (p.rounds && p.rounds.length > 0) ? p.rounds : getSystemRounds(slots.length)
+  const rounds = seRounds(phase)
 
   const getName = (fid: string | null): string | null => {
     if (!fid || !participants) return null
@@ -410,11 +526,7 @@ export function buildBracketRounds(
     return pt ? participantName(pt) : null
   }
 
-  const findMatch = (f1: string, f2: string) =>
-    allMatches?.find(m =>
-      (m.fighter1Id === f1 && m.fighter2Id === f2) ||
-      (m.fighter1Id === f2 && m.fighter2Id === f1)
-    )
+  const lookup = createCellLookup(phase.id, allMatches, placements)
 
   // currentIds[i] = fighterId for i-th slot of the current round (null = not yet known)
   let currentIds: (string | null)[] = resolvedIds
@@ -426,15 +538,21 @@ export function buildBracketRounds(
     const nextIds: (string | null)[] = []
 
     const matches: BracketMatchData[] = Array.from({ length: matchCount }, (_, i) => {
-      const topId = currentIds[i * 2] ?? null
-      const bottomId = currentIds[i * 2 + 1] ?? null
+      let topId = currentIds[i * 2] ?? null
+      let bottomId = currentIds[i * 2 + 1] ?? null
+
+      const m = lookup.find(round.id, i, topId, bottomId)
+
+      // Ячейка занята, а посадка не резолвится (посев ещё/уже не считается) —
+      // участников показываем по самой встрече: она уже создана и авторитетна.
+      if (m && !topId && !bottomId) {
+        topId = m.fighter1Id
+        bottomId = m.fighter2Id ?? null
+      }
 
       // Winner feeds into the next round slot
-      let winnerId: string | null = null
-      if (topId && bottomId) {
-        const m = findMatch(topId, bottomId)
-        if (m?.status === 'Completed' && m.winnerId) winnerId = m.winnerId
-      }
+      const winnerId: string | null =
+        m?.status === 'Completed' && m.winnerId ? m.winnerId : null
       nextIds.push(winnerId)
 
       const topName = getName(topId)
@@ -571,13 +689,17 @@ export interface GroupStanding {
 
 // Standings are computed from anything that looks like a head-to-head result:
 // singles Matches, or team Encounters mapped via `encountersToStandingsMatches`.
-export type StandingsMatch = Pick<Match, 'fighter1Id' | 'fighter2Id' | 'status' | 'score1' | 'score2' | 'winnerId'>
+// `id` нужен для резолва по ячейке: размещение ссылается на встречу по id.
+export type StandingsMatch = Pick<Match, 'id' | 'fighter1Id' | 'fighter2Id' | 'status' | 'score1' | 'score2' | 'winnerId'>
 
 // Maps team Encounters onto the StandingsMatch shape so the same round-robin
 // standings logic works for team group stages (team id ↔ participant id, the
 // encounter aggregate score ↔ match score, winnerParticipantId ↔ winnerId).
+// Размещений у серий нет (бэкенд размещает только `Match`), поэтому командные
+// фазы остаются на резолве по паре — как турниры без размещений.
 export function encountersToStandingsMatches(encounters: Encounter[]): StandingsMatch[] {
   return encounters.map(e => ({
+    id: e.id,
     fighter1Id: e.participant1Id,
     fighter2Id: e.participant2Id,
     status: e.status,
@@ -673,6 +795,7 @@ export function resolveDERoundPairs(
   phase: DEPhase,
   groupStandings: GroupStanding[][],
   allMatches: Match[],
+  placements?: MatchPlacement[],
 ): { ubPairs: ([string | null, string | null])[][], lbPairs: ([string | null, string | null])[][] } {
   type Pair = [string | null, string | null]
   const { slots: ubSlots, rounds: ubRounds } = phase.upperBracket
@@ -685,19 +808,18 @@ export function resolveDERoundPairs(
     return groupStandings[groupIdx]?.[rank - 1]?.fighterId ?? null
   }
 
-  const findMatch = (f1: string, f2: string) =>
-    allMatches.find(m =>
-      (m.fighter1Id === f1 && m.fighter2Id === f2) ||
-      (m.fighter1Id === f2 && m.fighter2Id === f1)
-    )
+  // Резолв по ячейке: в DE переигровки штатны (одногруппники в UB и LB,
+  // гранд-финал и матч-сброс — та же пара подряд), поэтому пара как
+  // идентификатор здесь ломается структурно.
+  const lookup = createCellLookup(phase.id, allMatches, placements)
 
-  const matchWinner = (f1: string, f2: string): string | null => {
-    const m = findMatch(f1, f2)
+  const matchWinner = (roundId: string, slot: number, f1: string, f2: string): string | null => {
+    const m = lookup.find(roundId, slot, f1, f2)
     return m?.status === 'Completed' && m.winnerId ? m.winnerId : null
   }
 
-  const matchLoser = (f1: string, f2: string): string | null => {
-    const m = findMatch(f1, f2)
+  const matchLoser = (roundId: string, slot: number, f1: string, f2: string): string | null => {
+    const m = lookup.find(roundId, slot, f1, f2)
     if (m?.status === 'Completed' && m.winnerId)
       return (m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id) ?? null
     return null
@@ -711,8 +833,8 @@ export function resolveDERoundPairs(
   }
   const lbDirectSlots = lbSlots.map(s => resolveSlot(s.source, s.rank))
 
-  const hasRoundMatches = (pairs: Pair[]): boolean =>
-    pairs.some(([f1, f2]) => !!(f1 && f2 && findMatch(f1, f2)))
+  const hasRoundMatches = (pairs: Pair[], roundId: string): boolean =>
+    pairs.some(([f1, f2], i) => !!lookup.find(roundId, i, f1, f2))
 
   const ubPairs: Pair[][] = []
   {
@@ -720,11 +842,12 @@ export function resolveDERoundPairs(
     for (let i = 0; i + 1 < ubDirectSlots.length; i += 2)
       r0.push([ubDirectSlots[i], ubDirectSlots[i + 1]])
     // Only resolve names if UB first-round matches actually exist in the DB
-    if (hasRoundMatches(r0)) {
+    if (ubRounds.length > 0 && hasRoundMatches(r0, ubRounds[0].id)) {
       ubPairs.push(r0)
       for (let ri = 1; ri < ubRounds.length; ri++) {
         const byes = ubByesByRound[ubRounds[ri].id] ?? []
-        const prevWinners = ubPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
+        const prevWinners = ubPairs[ri - 1].map(([f1, f2], i) =>
+          (f1 && f2) ? matchWinner(ubRounds[ri - 1].id, i, f1, f2) : null)
         let pairs: Pair[]
         if (byes.length > 0) {
           pairs = prevWinners.map((w, idx) => [w, byes[idx] ?? null] as Pair)
@@ -744,16 +867,18 @@ export function resolveDERoundPairs(
     for (let i = 0; i + 1 < lbDirectSlots.length; i += 2)
       r0.push([lbDirectSlots[i], lbDirectSlots[i + 1]])
     // Only resolve names if LB first-round matches actually exist in the DB
-    if (hasRoundMatches(r0)) {
+    if (lbRounds.length > 0 && hasRoundMatches(r0, lbRounds[0].id)) {
       lbPairs.push(r0)
       for (let ri = 1; ri < lbRounds.length; ri++) {
         const round = lbRounds[ri]
-        const prevWinners = lbPairs[ri - 1].map(([f1, f2]) => (f1 && f2) ? matchWinner(f1, f2) : null)
+        const prevWinners = lbPairs[ri - 1].map(([f1, f2], i) =>
+          (f1 && f2) ? matchWinner(lbRounds[ri - 1].id, i, f1, f2) : null)
         let slotsForRound: (string | null)[] = [...prevWinners]
         if (round.dropdownsFrom) {
           const ubRi = ubRounds.findIndex(r => r.id === round.dropdownsFrom)
-          if (ubRi >= 0) {
-            const losers = ubPairs[ubRi].map(([f1, f2]) => (f1 && f2) ? matchLoser(f1, f2) : null)
+          if (ubRi >= 0 && ubPairs[ubRi]) {
+            const losers = ubPairs[ubRi].map(([f1, f2], i) =>
+              (f1 && f2) ? matchLoser(ubRounds[ubRi].id, i, f1, f2) : null)
             slotsForRound = []
             for (let i = 0; i < prevWinners.length; i++) {
               slotsForRound.push(prevWinners[i])
