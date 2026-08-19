@@ -309,11 +309,12 @@ export default function MatchPage() {
   // Team bout context
   const isBout = match.encounterId != null
   const isTieBreak = match.boutNumber === 10
-  // For bouts the effective duration is resolved by the backend with encounter
-  // priority; for singles the tournament default wins (see AI-context §8).
-  const totalFightSeconds = isBout
-    ? match.effectiveRoundDurationSeconds
-    : (tournament?.defaultRoundDurationSeconds ?? match.effectiveRoundDurationSeconds)
+  // Резолв эффективных настроек — целиком на сервере (ТЗ §5.3): встреча ?? override
+  // раунда ?? дефолт турнира, а для боута ещё и длительность серии. Клиент его не
+  // повторяет и не перебивает: с тех пор как раунд встречи известен из размещения,
+  // турнирный дефолт поверх `effective*` съедал бы `overrides` формата — например,
+  // 150-секундный гранд-финал показывался бы как обычный бой (B-3, docs/04 §8).
+  const totalFightSeconds = match.effectiveRoundDurationSeconds ?? tournament?.defaultRoundDurationSeconds
 
   // Soft cap: encounter aggregate (which already includes this in-progress bout)
   // reaching the bout's targetCumulativeScore signals the referee to end the bout.
@@ -718,8 +719,10 @@ export default function MatchPage() {
         <summary style={{ cursor: 'pointer' }}>Настройки встречи</summary>
         <ul style={{ marginTop: 6 }}>
           <li>Время боя: {totalFightSeconds != null ? `${totalFightSeconds} с` : '—'}</li>
-          <li>Лимит обоюдных: {tournament?.defaultMaxDoubles ?? match.effectiveMaxDoubles ?? '—'}</li>
-          <li>Лимит предупреждений: {tournament?.defaultMaxWarnings ?? match.effectiveMaxWarnings ?? '—'}</li>
+          {/* Те же значения, по которым выше подсвечиваются перелимиты, — иначе
+              панель настроек расходилась бы с табло на встрече с `overrides`. */}
+          <li>Лимит обоюдных: {match.effectiveMaxDoubles ?? tournament?.defaultMaxDoubles ?? '—'}</li>
+          <li>Лимит предупреждений: {match.effectiveMaxWarnings ?? tournament?.defaultMaxWarnings ?? '—'}</li>
         </ul>
       </details>
     </div>

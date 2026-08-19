@@ -592,6 +592,148 @@ export interface DEPhase {
   overrides?: Array<{ roundId: string; roundDurationSeconds?: number }>
 }
 
+// ── Гранд-финал DE: серия до двух побед (АР-15, инварианты 37-40) ───────────
+// Отдельной сущности серии нет: гранд-финал — это одна или две обычные встречи
+// в ячейках `grandFinal#0` и `grandFinalReset#0`, а счёт серии вычисляется, не
+// хранится.
+//
+// `reset` и `advantage` дают ОДИН И ТОТ ЖЕ граф встреч (спека формата §4.8):
+// победитель верхней сетки входит со счётом 1:0 и ему достаточно одной победы,
+// победитель нижней обязан выиграть оба матча. Различие — только в подписи:
+// `advantage` показывает счёт серии, `reset` — названия матчей. Форы по счёту
+// ВНУТРИ боя нет и быть не может: `score1/score2` считаются из сходов, стартовый
+// счёт хранить негде (АР-15, ТЗ §5.5) — гандикап отыгрывается тем, что
+// представителю UB хватает одной победы.
+export type GrandFinalMode = DEPhase['grandFinal']
+
+export type GrandFinalRoundId = typeof GRAND_FINAL_ROUND_ID | typeof GRAND_FINAL_RESET_ROUND_ID
+
+export interface GrandFinalCreate {
+  roundId: GrandFinalRoundId
+  slotIndex: number
+  fighter1Id: string   // всегда представитель верхней сетки
+  fighter2Id: string   // всегда представитель нижней сетки
+}
+
+export type GrandFinalState =
+  | 'waiting'      // сетки не доиграны — пара гранд-финала ещё неизвестна
+  | 'toCreate'     // есть что создать (`next`)
+  | 'inProgress'   // встреча создана, победителя пока нет
+  | 'completed'    // чемпион определён (инвариант 40)
+
+export interface GrandFinalSeries<M> {
+  mode: GrandFinalMode
+  /** `reset` | `advantage` — серия до двух побед с форой верхней сетки. */
+  isSeries: boolean
+  ubWinnerId: string | null
+  lbWinnerId: string | null
+  gf?: M       // ячейка `grandFinal#0`
+  reset?: M    // ячейка `grandFinalReset#0`
+  /** Гранд-финал выиграл представитель нижней сетки → нужен второй матч (инвариант 39). */
+  resetRequired: boolean
+  /** Счёт серии `[UB, LB]`. В серии стартует 1:0, в `simple` — 0:0. */
+  score: [number, number]
+  championId: string | null
+  next: GrandFinalCreate | null
+  state: GrandFinalState
+}
+
+type DecidableMatch = PlaceableMatch & Pick<Match, 'status' | 'winnerId'>
+
+const decidedWinner = (m: DecidableMatch | undefined): string | null =>
+  m && (m.status === 'Completed' || m.status === 'WalkoverWin') ? m.winnerId ?? null : null
+
+export function resolveGrandFinalSeries<M extends DecidableMatch>(
+  mode: GrandFinalMode,
+  lookup: PhaseCellLookup<M>,
+  ubWinnerId: string | null,
+  lbWinnerId: string | null,
+): GrandFinalSeries<M> {
+  const isSeries = mode === 'reset' || mode === 'advantage'
+  // Фора верхней сетки — это стартовый счёт СЕРИИ, а не очки внутри боя.
+  const score: [number, number] = isSeries ? [1, 0] : [0, 0]
+
+  if (!ubWinnerId || !lbWinnerId) {
+    return {
+      mode, isSeries, ubWinnerId, lbWinnerId,
+      resetRequired: false, score, championId: null, next: null, state: 'waiting',
+    }
+  }
+
+  // Строго по ячейке: в матче-сбросе та же пара, что и в гранд-финале, поэтому
+  // резолв по паре подставил бы одну встречу в обе ячейки (дефект Д-2, docs/08).
+  // Фолбэк по паре остаётся только для турниров без размещений (инвариант 46);
+  // там матч-сброс не создаётся, подменять нечего.
+  const gf = lookup.placed
+    ? lookup.at(GRAND_FINAL_ROUND_ID, 0)
+    : lookup.find(GRAND_FINAL_ROUND_ID, 0, ubWinnerId, lbWinnerId)
+  const reset = lookup.placed ? lookup.at(GRAND_FINAL_RESET_ROUND_ID, 0) : undefined
+
+  const gfWinner = decidedWinner(gf)
+  const resetWinner = decidedWinner(reset)
+
+  if (gfWinner === ubWinnerId) score[0]++
+  else if (gfWinner === lbWinnerId) score[1]++
+  if (resetWinner === ubWinnerId) score[0]++
+  else if (resetWinner === lbWinnerId) score[1]++
+
+  // Инвариант 39: матч-сброс — тогда и только тогда, когда гранд-финал выиграл
+  // представитель нижней сетки.
+  const resetRequired = isSeries && gfWinner != null && gfWinner === lbWinnerId
+  // Инвариант 40: чемпион — победитель гранд-финала, если он из верхней сетки;
+  // иначе победитель матча-сброса.
+  const championId = isSeries
+    ? (gfWinner === ubWinnerId ? ubWinnerId : resetWinner)
+    : gfWinner
+
+  let next: GrandFinalCreate | null = null
+  if (!gf) {
+    next = { roundId: GRAND_FINAL_ROUND_ID, slotIndex: 0, fighter1Id: ubWinnerId, fighter2Id: lbWinnerId }
+  } else if (resetRequired && !reset && lookup.placed) {
+    // Только в размещённой фазе: без ячеек матч-сброс неотличим от самого
+    // гранд-финала (та же пара подряд) — старый турнир остаётся без него.
+    next = { roundId: GRAND_FINAL_RESET_ROUND_ID, slotIndex: 0, fighter1Id: ubWinnerId, fighter2Id: lbWinnerId }
+  }
+
+  return {
+    mode, isSeries, ubWinnerId, lbWinnerId, gf, reset, resetRequired, score, championId, next,
+    state: next ? 'toCreate' : championId ? 'completed' : 'inProgress',
+  }
+}
+
+// Сообщение генератора, когда создавать нечего: «Нет встреч для генерации»
+// одинаково звучит и для недоигранного полуфинала, и для уже определённого
+// чемпиона. null = гранд-финалу сказать нечего, вызывающий даёт общий текст.
+export function grandFinalHint<M extends DecidableMatch>(
+  series: GrandFinalSeries<M>,
+  nameOf: (participantId: string) => string,
+): string | null {
+  if (series.state === 'waiting' || series.state === 'toCreate') return null
+
+  const scoreText = series.isSeries ? ` Счёт серии ${series.score[0]}:${series.score[1]}.` : ''
+
+  if (series.championId) {
+    return series.isSeries
+      ? `Серия гранд-финала сыграна.${scoreText} Чемпион — ${nameOf(series.championId)}.`
+      : `Гранд-финал сыгран. Чемпион — ${nameOf(series.championId)}.`
+  }
+  if (series.reset && !decidedWinner(series.reset)) {
+    return series.reset.status === 'Completed'
+      ? 'Матч-сброс завершён без победителя — проставьте результат, иначе чемпион не определяется.'
+      : `Матч-сброс создан, но ещё не сыгран.${scoreText}`
+  }
+  if (series.resetRequired && !series.reset) {
+    return 'Гранд-финал выиграл представитель нижней сетки — нужен матч-сброс, но фаза не размещена ' +
+           'в ячейках сетки (турнир создан до размещений). Заведите второй матч вручную.'
+  }
+  if (series.gf) {
+    return series.gf.status === 'Completed'
+      ? 'Гранд-финал завершён без победителя — проставьте результат, иначе чемпион не определяется.'
+      : `Гранд-финал создан, но ещё не сыгран.${scoreText}`
+  }
+  return null
+}
+
 // Computes match count per UB round using the same round-by-round logic as the backend validator.
 // directSlots (no entersAt) enter round 1; bye slots (entersAt) enter the named round.
 // Match count = winners = losers for each round (used by buildLBRounds for dropdown sizing).
@@ -796,7 +938,11 @@ export function resolveDERoundPairs(
   groupStandings: GroupStanding[][],
   allMatches: Match[],
   placements?: MatchPlacement[],
-): { ubPairs: ([string | null, string | null])[][], lbPairs: ([string | null, string | null])[][] } {
+): {
+  ubPairs: ([string | null, string | null])[][]
+  lbPairs: ([string | null, string | null])[][]
+  grandFinal: GrandFinalSeries<Match>
+} {
   type Pair = [string | null, string | null]
   const { slots: ubSlots, rounds: ubRounds } = phase.upperBracket
   const { slots: lbSlots, rounds: lbRounds } = phase.lowerBracket
@@ -894,7 +1040,25 @@ export function resolveDERoundPairs(
     }
   }
 
-  return { ubPairs, lbPairs }
+  // Гранд-финал сводит победителей финалов обеих сеток. Раунды сеток
+  // заполняются только до тех пор, пока их встречи существуют, поэтому пустой
+  // хвост `ubPairs`/`lbPairs` сам по себе значит «финал ещё не сыгран».
+  const bracketFinalWinner = (rounds: Array<{ id: string }>, pairs: Pair[][]): string | null => {
+    const last = rounds.length - 1
+    if (last < 0 || pairs.length <= last) return null
+    const pair = pairs[last][0]
+    const m = lookup.find(rounds[last].id, 0, pair?.[0], pair?.[1])
+    return m?.status === 'Completed' && m.winnerId ? m.winnerId : null
+  }
+
+  const grandFinal = resolveGrandFinalSeries(
+    phase.grandFinal,
+    lookup,
+    bracketFinalWinner(ubRounds, ubPairs),
+    bracketFinalWinner(lbRounds, lbPairs),
+  )
+
+  return { ubPairs, lbPairs, grandFinal }
 }
 
 export function buildLBRounds(

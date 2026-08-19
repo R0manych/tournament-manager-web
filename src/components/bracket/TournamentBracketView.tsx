@@ -7,7 +7,7 @@ import {
   resolvePlayoffSlots, resolveDERoundPairs,
   type PhaseStandingsCache,
 } from './bracketUtils'
-import type { DEPhase } from './bracketUtils'
+import type { DEPhase, GrandFinalSeries } from './bracketUtils'
 import RoundRobinPhaseView from './RoundRobinPhaseView'
 import SingleEliminationView from './SingleEliminationView'
 import DoubleEliminationView from './DoubleEliminationView'
@@ -167,6 +167,7 @@ export default function TournamentBracketView({
           const dePhase = phase as unknown as DEPhase
           let ubPairs: ([string | null, string | null])[][] | undefined
           let lbPairs: ([string | null, string | null])[][] | undefined
+          let grandFinal: GrandFinalSeries<Match> | undefined
           if (allMatches) {
             const fromPhaseId = dePhase.upperBracket.slots[0]?.source?.split('.')?.[0]
             if (fromPhaseId) {
@@ -175,6 +176,7 @@ export default function TournamentBracketView({
                 const resolved = resolveDERoundPairs(dePhase, cached.standings, allMatches, placements)
                 ubPairs = resolved.ubPairs
                 lbPairs = resolved.lbPairs
+                grandFinal = resolved.grandFinal
               }
             }
           }
@@ -186,6 +188,7 @@ export default function TournamentBracketView({
               participants={participants}
               ubPairs={ubPairs}
               lbPairs={lbPairs}
+              grandFinal={grandFinal}
             />
           )
         }
