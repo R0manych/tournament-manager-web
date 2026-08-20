@@ -7,16 +7,25 @@ import { tournamentsApi } from '../api/tournaments'
 import { encountersApi } from '../api/encounters'
 import type { AddExchangeRequest, Exchange, MatchStatus } from '../api/types'
 import { participantShortName, participantName } from '../api/types'
+import { formatClock, formatCountdown, remainingSeconds } from '../lib/timer'
+import {
+  clearTimerOffset,
+  parseTimerOffset,
+  readTimerOffset,
+  timerOffsetKey,
+  writeTimerOffset,
+} from '../lib/timerOffset'
 
 // ─── Fight Timer ──────────────────────────────────────────────────────────────
 
 function FightTimer({
-  startedAt,
+  anchorMs,
   totalSeconds,
   paused,
   pauseAccSec,
 }: {
-  startedAt: string
+  /** Якорь отсчёта — `currentRoundStartedAt` (ТЗ §7.4). */
+  anchorMs: number
   totalSeconds?: number
   paused: boolean
   pauseAccSec: number
@@ -24,20 +33,17 @@ function FightTimer({
   const [display, setDisplay] = useState(0)
 
   useEffect(() => {
-    const compute = () => {
-      const rawElapsed = (Date.now() - new Date(startedAt).getTime()) / 1000
-      const elapsed = rawElapsed - pauseAccSec
-      return totalSeconds != null ? Math.max(0, totalSeconds - elapsed) : Math.max(0, elapsed)
-    }
+    const compute = () =>
+      remainingSeconds({ anchorMs, nowMs: Date.now(), totalSeconds, pauseAccSec })
     setDisplay(compute())
     if (paused) return
     const id = setInterval(() => setDisplay(compute()), 200)
     return () => clearInterval(id)
-  }, [startedAt, totalSeconds, paused, pauseAccSec])
+  }, [anchorMs, totalSeconds, paused, pauseAccSec])
 
-  const m = Math.floor(display / 60)
-  const s = Math.floor(display % 60)
-  const expired = totalSeconds != null && Math.floor(display) === 0
+  // `remainingSeconds` зажимает остаток в ноль, поэтому «время вышло» — это
+  // ровно ноль, а не «меньше секунды осталось».
+  const expired = totalSeconds != null && display === 0
 
   return (
     <div style={{ textAlign: 'center', margin: '4px 0' }}>
@@ -49,7 +55,7 @@ function FightTimer({
         fontVariantNumeric: 'tabular-nums',
         color: expired ? 'var(--c-danger)' : paused ? '#aaa' : undefined,
       }}>
-        {m}:{s.toString().padStart(2, '0')}
+        {totalSeconds != null ? formatCountdown(display) : formatClock(display)}
       </div>
       {expired && (
         <div style={{ color: 'var(--c-danger)', fontSize: '0.85em', marginTop: 4 }}>— время вышло</div>
@@ -211,6 +217,92 @@ export default function MatchPage() {
     refetchInterval: q => (q.state.data?.status === 'InProgress' ? 5000 : false),
   })
 
+  // Якорь отсчёта — `currentRoundStartedAt` (ТЗ §7.4). Перехода раунда в UI нет
+  // (раундов в дисциплине нет, серия — это отдельные встречи, АР-15), поэтому
+  // якорь совпадает со `startedAt`; он же и фолбэк, если метки раунда нет.
+  const anchorIso = match?.currentRoundStartedAt ?? match?.startedAt
+  const anchorMs =
+    match?.status === 'InProgress' && anchorIso ? new Date(anchorIso).getTime() : null
+
+  // Взведён ли таймер на этот якорь и видели ли мы встречу в этой вкладке.
+  const armedAnchorRef = useRef<number | null>(null)
+  const observedRef = useRef(false)
+
+  // Перевзвод таймера при смене якоря. Правило (B-3): смена якоря в живой
+  // вкладке — пауза с полным временем; первое наблюдение (открытие страницы,
+  // F5) — восстановление на ходу по ТЗ §7.4.
+  useEffect(() => {
+    if (!match) return
+    const firstObservation = !observedRef.current
+    observedRef.current = true
+
+    if (anchorMs == null) {
+      // Бой не идёт: следующий переход в InProgress считается сменой якоря,
+      // а клиентский сдвиг завершённой встречи никому больше не нужен.
+      armedAnchorRef.current = null
+      clearTimerOffset(match.id)
+      return
+    }
+    if (armedAnchorRef.current === anchorMs) return
+    armedAnchorRef.current = anchorMs
+
+    // Готовая запись под этот якорь старше собственного перевзвода — и после F5,
+    // и когда вторая вкладка узнала о новом раунде из поллинга уже после того,
+    // как его взвёл пульт. Иначе она перевзвела бы таймер по-своему и вернула
+    // идущий у пульта отсчёт в паузу.
+    const saved = readTimerOffset(match.id, anchorMs)
+    if (saved) {
+      setPaused(saved.paused)
+      setPauseAcc(saved.pauseAccSec)
+      // Пауза, начатая до перезагрузки, продолжает копиться: «Продолжить»
+      // добавит и время, пока вкладки не было.
+      pauseStartRef.current = saved.pauseStartedMs ?? Date.now()
+      return
+    }
+
+    if (firstObservation) {
+      // Открытие страницы или F5, сдвига в браузере нет: сервер пауз не хранит
+      // (§7.3), поэтому восстанавливаем на ходу по ТЗ §7.4.
+      setPaused(false)
+      setPauseAcc(0)
+      writeTimerOffset(match.id, { anchorMs, pauseAccSec: 0, paused: false, pauseStartedMs: null })
+      return
+    }
+    // Старт боя и «Вернуть в бой»: сворачиваем уже прошедшее
+    // с момента якоря в `pauseAcc`, чтобы раунд начался с полного времени по
+    // «Продолжить». Заодно это гасит расхождение часов клиента и сервера —
+    // работающий таймер считает от момента перевзвода, а не от серверной метки.
+    const folded = Math.max(0, (Date.now() - anchorMs) / 1000)
+    const startedMs = Date.now()
+    setPaused(true)
+    setPauseAcc(folded)
+    pauseStartRef.current = startedMs
+    writeTimerOffset(match.id, {
+      anchorMs,
+      pauseAccSec: folded,
+      paused: true,
+      pauseStartedMs: startedMs,
+    })
+  }, [match, anchorMs])
+
+  // Соседняя вкладка того же боя изменила сдвиг (пауза, «Продолжить») —
+  // подхватываем. Событие `storage` приходит только в другие вкладки, поэтому
+  // обратной записи здесь нет и зацикливания не возникает.
+  useEffect(() => {
+    const matchId = match?.id
+    if (!matchId || anchorMs == null) return
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== timerOffsetKey(matchId)) return
+      const next = parseTimerOffset(e.newValue, anchorMs)
+      if (!next) return
+      setPaused(next.paused)
+      setPauseAcc(next.pauseAccSec)
+      pauseStartRef.current = next.pauseStartedMs ?? Date.now()
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [match?.id, anchorMs])
+
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['matches', id] })
     // A bout score change moves the encounter aggregate — refresh it too.
@@ -224,25 +316,15 @@ export default function MatchPage() {
     mutationFn: (s: MatchStatus) => matchesApi.setStatus(id!, s),
     onSuccess: (updated) => {
       // Immediately put server response into cache — no wait for refetch.
-      // This ensures FightTimer sees startedAt right away when going InProgress.
+      // This ensures FightTimer sees the new anchor right away when going InProgress.
       qc.setQueryData(['matches', id], updated)
       // Отмена встречи освобождает её ячейку сетки (инвариант 44) — сетка на
       // странице турнира обязана увидеть, что ячейка опустела.
       if (updated.status === 'Cancelled') {
         qc.invalidateQueries({ queryKey: ['tournament-matches', updated.tournamentId] })
       }
-      if (updated.status === 'InProgress') {
-        // Re-arm the client-side timer on every (re)start — including reopening a
-        // completed bout via «Вернуть в бой». Fold all time already elapsed since
-        // the server `startedAt` into `pauseAcc`, so the countdown begins from full
-        // when the referee presses «Старт таймера». Without this, an old startedAt
-        // (unchanged by the server on reopen) makes the timer resume mid-way or
-        // already expired. For a fresh start startedAt ≈ now, so this is a no-op.
-        const startedMs = updated.startedAt ? new Date(updated.startedAt).getTime() : Date.now()
-        setPaused(true)
-        setPauseAcc(Math.max(0, (Date.now() - startedMs) / 1000))
-        pauseStartRef.current = Date.now()
-      }
+      // Взвод таймера живёт в эффекте по смене якоря (см. выше), а не здесь:
+      // якорь меняется и при старте боя, и при «Вернуть в бой».
       invalidate()
     },
   })
@@ -265,15 +347,26 @@ export default function MatchPage() {
     onSuccess: invalidate,
   })
 
+  // Каждое изменение сдвига пишем сразу в точке изменения, а не эффектом:
+  // эффект в том же коммите видел бы ещё старое состояние и затирал бы запись,
+  // которую только что восстановила вторая вкладка.
+  function persistOffset(pauseAccSec: number, paused: boolean, pauseStartedMs: number | null) {
+    if (!match || anchorMs == null) return
+    writeTimerOffset(match.id, { anchorMs, pauseAccSec, paused, pauseStartedMs })
+  }
+
   function handlePause() {
-    pauseStartRef.current = Date.now()
+    const startedMs = Date.now()
+    pauseStartRef.current = startedMs
     setPaused(true)
+    persistOffset(pauseAcc, true, startedMs)
   }
 
   function handleResume() {
-    const ms = Date.now() - pauseStartRef.current
-    setPauseAcc(a => a + ms / 1000)
+    const acc = pauseAcc + (Date.now() - pauseStartRef.current) / 1000
+    setPauseAcc(acc)
     setPaused(false)
+    persistOffset(acc, false, null)
   }
 
   function quickScore(p1: number, p2: number, isDouble = false) {
@@ -502,9 +595,9 @@ export default function MatchPage() {
 
       {/* Timer + action buttons */}
       <div style={{ textAlign: 'center', margin: '16px 0 20px' }}>
-        {isInProgress && match.startedAt && (
+        {isInProgress && anchorMs != null && (
           <FightTimer
-            startedAt={match.startedAt}
+            anchorMs={anchorMs}
             totalSeconds={totalFightSeconds}
             paused={paused}
             pauseAccSec={pauseAcc}
