@@ -128,6 +128,10 @@ export interface Match {
   score2: number
   warnings1: number
   warnings2: number
+  // Запрошенные видеоповторы. Лимита нет ни на встрече, ни в формате — счётчик
+  // только считает, регламент турнира решает, сколько повторов положено стороне.
+  videoReplays1: number
+  videoReplays2: number
   doubleHitsCount: number
   winnerId?: string
   roundDurationSeconds?: number

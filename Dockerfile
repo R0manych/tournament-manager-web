@@ -17,5 +17,8 @@ COPY . .
 RUN npm run build
 
 FROM nginx:1.27-alpine AS final
+# Конфиг вшиваем в образ: SPA history-fallback + прокси /api → api:8080.
+# Без него nginx отдаёт дефолтный конфиг, и роутинг SPA ломается на F5.
+COPY nginx.conf /etc/nginx/nginx.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80

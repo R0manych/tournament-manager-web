@@ -116,13 +116,20 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
     last: f1?.lastName ?? '…',
     club: f1?.club,
     score: live.score1,
+    // Повторы не идут через канал (пульт шлёт только счёт) — приезжают
+    // поллингом, как предупреждения. Секунда задержки здесь роли не играет.
+    replays: match.videoReplays1,
   }
   const right = {
     first: isBye ? '' : f2?.firstName ?? '',
     last: isBye ? 'БАЙ' : f2?.lastName ?? '…',
     club: isBye ? undefined : f2?.club,
     score: live.score2,
+    replays: isBye ? 0 : match.videoReplays2,
   }
+
+  const doublesOver =
+    match.effectiveMaxDoubles != null && live.doubleHitsCount >= match.effectiveMaxDoubles
 
   const winnerSide =
     !isFinished ? null
@@ -185,8 +192,11 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
           </div>
           {frozen && !expired && <div style={TIMER_NOTE}>пауза</div>}
           {expired && <div style={{ ...TIMER_NOTE, color: RED.text }}>время вышло</div>}
+          {/* Обоюдные с лимитом. Достигнутый лимит подсвечивается — это то же
+              предупреждение, что и на карточке боя у судьи, и залу оно тоже
+              адресовано. Лимит сигналит, не принуждает (АР-12/13). */}
           {live.doubleHitsCount > 0 && (
-            <div style={DOUBLES}>
+            <div style={{ ...DOUBLES, color: doublesOver ? RED.text : MUTED }}>
               ⚔ {live.doubleHitsCount}
               {match.effectiveMaxDoubles != null && ` / ${match.effectiveMaxDoubles}`}
             </div>
@@ -330,6 +340,7 @@ function SidePanel({
   last,
   club,
   score,
+  replays,
   isWinner,
 }: {
   side: 'left' | 'right'
@@ -338,6 +349,8 @@ function SidePanel({
   last: string
   club?: string
   score: number
+  /** Израсходованные видеоповторы этой стороны. Лимита в модели нет. */
+  replays: number
   isWinner: boolean
 }) {
   const align = side === 'left' ? 'flex-start' : 'flex-end'
@@ -373,6 +386,14 @@ function SidePanel({
           fontVariantNumeric: 'tabular-nums',
         }}
       />
+
+      {/* Видеоповторы — вторым планом: залу важно, что ресурс израсходован, но
+          спорить с этим числом некому, поэтому оно не спорит за внимание. */}
+      {replays > 0 && (
+        <div style={{ fontSize: '3vh', color: MUTED, fontVariantNumeric: 'tabular-nums' }}>
+          🎥 {replays}
+        </div>
+      )}
 
       {isWinner && <div style={{ fontSize: '3.6vh', fontWeight: 700, color: '#5ddc7a' }}>Победа</div>}
     </section>

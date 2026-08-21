@@ -25,6 +25,8 @@ export const matchesApi = {
     api.patch<Match>(`/matches/${id}/status`, { status }),
   updateWarnings: (id: string, fighter1Delta?: number, fighter2Delta?: number) =>
     api.patch<Match>(`/matches/${id}/warnings`, { fighter1Delta, fighter2Delta }),
+  updateVideoReplays: (id: string, fighter1Delta?: number, fighter2Delta?: number) =>
+    api.patch<Match>(`/matches/${id}/video-replays`, { fighter1Delta, fighter2Delta }),
   advanceRound: (id: string) => api.post<Match>(`/matches/${id}/advance-round`),
 
   addExchange: (matchId: string, data: AddExchangeRequest) =>
