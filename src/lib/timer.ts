@@ -27,6 +27,14 @@ export function remainingSeconds({
   return totalSeconds != null ? Math.max(0, totalSeconds - elapsed) : Math.max(0, elapsed)
 }
 
+/**
+ * Остаток до абсолютного момента. Табло получает от пульта именно `deadlineMs`
+ * (АР-14): передавать «время раз в секунду» нельзя, а момент нуля не дребезжит.
+ */
+export function remainingUntil(deadlineMs: number, nowMs: number): number {
+  return Math.max(0, (deadlineMs - nowMs) / 1000)
+}
+
 /** `m:ss` из секунд, округление вниз — для прямого отсчёта (секундомер). */
 export function formatClock(seconds: number): string {
   return clock(Math.max(0, Math.floor(seconds)))

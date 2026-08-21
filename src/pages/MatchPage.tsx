@@ -5,7 +5,7 @@ import { fightersApi } from '../api/fighters'
 import { matchesApi } from '../api/matches'
 import { tournamentsApi } from '../api/tournaments'
 import { encountersApi } from '../api/encounters'
-import type { AddExchangeRequest, Exchange, MatchStatus } from '../api/types'
+import type { AddExchangeRequest, Exchange, Match, MatchStatus } from '../api/types'
 import { participantShortName, participantName } from '../api/types'
 import { formatClock, formatCountdown, remainingSeconds } from '../lib/timer'
 import {
@@ -15,6 +15,12 @@ import {
   timerOffsetKey,
   writeTimerOffset,
 } from '../lib/timerOffset'
+import {
+  boardTimerOf,
+  openDisplayChannel,
+  parseDisplayMessage,
+  postDisplay,
+} from '../lib/displayChannel'
 
 // ─── Fight Timer ──────────────────────────────────────────────────────────────
 
@@ -224,6 +230,14 @@ export default function MatchPage() {
   const anchorMs =
     match?.status === 'InProgress' && anchorIso ? new Date(anchorIso).getTime() : null
 
+  // Резолв эффективных настроек — целиком на сервере (ТЗ §5.3): встреча ?? override
+  // раунда ?? дефолт турнира, а для боута ещё и длительность серии. Клиент его не
+  // повторяет и не перебивает: с тех пор как раунд встречи известен из размещения,
+  // турнирный дефолт поверх `effective*` съедал бы `overrides` формата — например,
+  // 150-секундный гранд-финал показывался бы как обычный бой (B-3, docs/04 §8).
+  const totalFightSeconds =
+    match?.effectiveRoundDurationSeconds ?? tournament?.defaultRoundDurationSeconds
+
   // Взведён ли таймер на этот якорь и видели ли мы встречу в этой вкладке.
   const armedAnchorRef = useRef<number | null>(null)
   const observedRef = useRef(false)
@@ -303,6 +317,76 @@ export default function MatchPage() {
     return () => window.removeEventListener('storage', onStorage)
   }, [match?.id, anchorMs])
 
+  // ─── Вещание на табло (АР-14) ───────────────────────────────────────────────
+  // Эта вкладка — пульт: она сообщает табло, какой бой смотрит организатор, и
+  // нормализованное состояние таймера. Тик не передаётся: табло тикает само от
+  // `deadlineMs`. Пауза живёт только на клиенте (АР-1), поэтому без этого канала
+  // табло разошлось бы с пультом на всех паузах.
+  const channelRef = useRef<BroadcastChannel | null>(null)
+  const publishRef = useRef<() => void>(() => {})
+
+  useEffect(() => {
+    const channel = openDisplayChannel()
+    channelRef.current = channel
+    if (!channel) return
+    const onMessage = (e: MessageEvent) => {
+      // Табло открылось или перезагрузилось — отвечаем текущим состоянием.
+      if (parseDisplayMessage(e.data)?.type === 'hello') publishRef.current()
+    }
+    channel.addEventListener('message', onMessage)
+    return () => {
+      channel.removeEventListener('message', onMessage)
+      channel.close()
+      channelRef.current = null
+    }
+  }, [])
+
+  const score = match
+    ? { score1: match.score1, score2: match.score2, doubleHitsCount: match.doubleHitsCount }
+    : null
+
+  useEffect(() => {
+    const matchId = match?.id
+    const tournamentId = match?.tournamentId
+    if (!matchId || !tournamentId) return
+    publishRef.current = () => {
+      const channel = channelRef.current
+      if (!channel) return
+      postDisplay(channel, { type: 'show', matchId, tournamentId })
+      postDisplay(channel, {
+        type: 'timer',
+        matchId,
+        timer: boardTimerOf({
+          anchorMs,
+          totalSeconds: totalFightSeconds,
+          paused,
+          pauseAccSec: pauseAcc,
+          pauseStartedMs: paused ? pauseStartRef.current : null,
+        }),
+      })
+      if (score != null) {
+        postDisplay(channel, {
+          type: 'score',
+          matchId,
+          score1: score.score1,
+          score2: score.score2,
+          doubleHitsCount: score.doubleHitsCount,
+        })
+      }
+    }
+    publishRef.current()
+  }, [
+    match?.id,
+    match?.tournamentId,
+    anchorMs,
+    totalFightSeconds,
+    paused,
+    pauseAcc,
+    score?.score1,
+    score?.score2,
+    score?.doubleHitsCount,
+  ])
+
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['matches', id] })
     // A bout score change moves the encounter aggregate — refresh it too.
@@ -328,19 +412,26 @@ export default function MatchPage() {
       invalidate()
     },
   })
+  // Ответ сервера — уже пересчитанная встреча (инвариант 1), поэтому кладём её
+  // в кэш сразу: и пульт, и табло видят новый счёт, не дожидаясь рефетча.
+  const applyUpdated = (updated: Match) => {
+    qc.setQueryData(['matches', id], updated)
+    invalidate()
+  }
+
   const warnMut = useMutation({
     mutationFn: ({ f1d, f2d }: { f1d?: number; f2d?: number }) =>
       matchesApi.updateWarnings(id!, f1d, f2d),
-    onSuccess: invalidate,
+    onSuccess: applyUpdated,
   })
   const addExchangeMut = useMutation({
     mutationFn: (data: AddExchangeRequest) => matchesApi.addExchange(id!, data),
-    onSuccess: () => { setNote(''); invalidate() },
+    onSuccess: (updated) => { setNote(''); applyUpdated(updated) },
   })
   const updateExchangeMut = useMutation({
     mutationFn: ({ exchangeId, data }: { exchangeId: string; data: AddExchangeRequest }) =>
       matchesApi.updateExchange(exchangeId, data),
-    onSuccess: invalidate,
+    onSuccess: applyUpdated,
   })
   const delExchangeMut = useMutation({
     mutationFn: (eid: string) => matchesApi.deleteExchange(eid),
@@ -393,6 +484,7 @@ export default function MatchPage() {
   const isInProgress = match.status === 'InProgress'
   const isCompleted = match.status === 'Completed'
   const isWalkover = match.status === 'WalkoverWin'
+  const isDoubleLoss = match.status === 'DoubleLoss'
 
   const winnerName =
     match.winnerId === match.fighter1Id ? name1
@@ -402,12 +494,6 @@ export default function MatchPage() {
   // Team bout context
   const isBout = match.encounterId != null
   const isTieBreak = match.boutNumber === 10
-  // Резолв эффективных настроек — целиком на сервере (ТЗ §5.3): встреча ?? override
-  // раунда ?? дефолт турнира, а для боута ещё и длительность серии. Клиент его не
-  // повторяет и не перебивает: с тех пор как раунд встречи известен из размещения,
-  // турнирный дефолт поверх `effective*` съедал бы `overrides` формата — например,
-  // 150-секундный гранд-финал показывался бы как обычный бой (B-3, docs/04 §8).
-  const totalFightSeconds = match.effectiveRoundDurationSeconds ?? tournament?.defaultRoundDurationSeconds
 
   // Soft cap: encounter aggregate (which already includes this in-progress bout)
   // reaching the bout's targetCumulativeScore signals the referee to end the bout.
@@ -452,6 +538,15 @@ export default function MatchPage() {
         <Link to={`/tournaments/${match.tournamentId}/matches`} style={{ color: '#888', whiteSpace: 'nowrap' }}>
           ← Встречи
         </Link>
+        <a
+          href={`/display/match/${match.id}`}
+          target="_blank"
+          rel="noopener"
+          title="Табло, закреплённое за этим боем: не переключится, когда рядом идут другие бои. Перетащите вкладку на второй монитор ристалища."
+          style={{ color: '#888', whiteSpace: 'nowrap' }}
+        >
+          🖵 Табло этого боя
+        </a>
         <span style={{ flex: 1 }} />
         {prevMatch && (
           <Link
@@ -527,14 +622,15 @@ export default function MatchPage() {
           borderRadius: 12,
           fontSize: '0.8em',
           fontWeight: 600,
-          background: isScheduled ? '#e8f4fd' : isInProgress ? '#e8f9ec' : '#f0f0f0',
-          color: isScheduled ? '#1976d2' : isInProgress ? '#2e7d32' : '#555',
+          background: isScheduled ? '#e8f4fd' : isInProgress ? '#e8f9ec' : isDoubleLoss ? '#fdeceb' : '#f0f0f0',
+          color: isScheduled ? '#1976d2' : isInProgress ? '#2e7d32' : isDoubleLoss ? '#b3261e' : '#555',
         }}>
           {match.status === 'Scheduled' && 'Запланирован'}
           {match.status === 'InProgress' && 'Идёт бой'}
           {match.status === 'Completed' && 'Завершён'}
           {match.status === 'Cancelled' && 'Отменён'}
           {match.status === 'WalkoverWin' && 'Бай (тех. победа)'}
+          {match.status === 'DoubleLoss' && 'Двойное поражение'}
         </span>
         {match.scheduledAt && (
           <span style={{ fontSize: '0.85em', color: '#888' }}>
@@ -587,6 +683,13 @@ export default function MatchPage() {
       </div>
 
       {/* Winner */}
+      {/* Двойное поражение — не ничья (АР-16): победителя нет, проиграли оба,
+          а счёт остаётся как есть и виден выше. */}
+      {isDoubleLoss && (
+        <p style={{ textAlign: 'center', fontWeight: 700, fontSize: '1.2em', color: '#b3261e', margin: '8px 0' }}>
+          Двойное поражение — победителя нет, поражение засчитано обоим
+        </p>
+      )}
       {(isCompleted || isWalkover) && (
         <p style={{ textAlign: 'center', fontWeight: 700, fontSize: '1.2em', color: winnerName ? '#2e7d32' : '#555', margin: '8px 0' }}>
           {isWalkover ? `Победитель (бай): ${name1}` : winnerName ? `Победитель: ${winnerName}` : 'Ничья'}
@@ -633,7 +736,24 @@ export default function MatchPage() {
               Завершить бой
             </button>
           )}
-          {isCompleted && (
+          {/* Двойное поражение (АР-16) — только вручную и только осознанно:
+              автоматики по лимитам нет, а статус терминальный. */}
+          {(isScheduled || isInProgress) && (
+            <button
+              onClick={() => {
+                if (!window.confirm(
+                  'Двойное поражение: победителя не будет, поражение засчитается обоим участникам. ' +
+                  'Набранный счёт сохранится. Продолжить?'
+                )) return
+                statusMut.mutate('DoubleLoss')
+              }}
+              disabled={statusMut.isPending}
+              style={BTN_DANGER}
+            >
+              Двойное поражение
+            </button>
+          )}
+          {(isCompleted || isDoubleLoss) && (
             <button
               onClick={() => statusMut.mutate('InProgress')}
               disabled={statusMut.isPending}
@@ -887,6 +1007,17 @@ const BTN_SECONDARY: React.CSSProperties = {
   border: '1px solid #bbb',
   background: '#fff',
   color: '#333',
+}
+
+const BTN_DANGER: React.CSSProperties = {
+  padding: '10px 24px',
+  fontSize: '1em',
+  fontWeight: 600,
+  borderRadius: 6,
+  cursor: 'pointer',
+  border: '1px solid #b3261e',
+  background: '#fff',
+  color: '#b3261e',
 }
 
 const BTN_SUCCESS: React.CSSProperties = {
