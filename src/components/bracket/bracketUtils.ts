@@ -266,6 +266,91 @@ export type PhaseStandingsCache = Map<string, {
   standings: GroupStanding[][]
 }>
 
+/**
+ * Составы и таблицы всех roundRobin-фаз, в порядке объявления: фаза с явным
+ * посевом (`seeding.groups`) резолвится из уже посчитанных предыдущих.
+ *
+ * Вынесено из `TournamentBracketView`, потому что тем же кэшем питаются и
+ * табло для зала (группы, сетка). Два независимых прохода по фазам разошлись бы
+ * на первой же правке — например, на фильтре `matchesOfPhase` (Д-3), который
+ * не даёт переигровке одногруппников в плейофф двигать групповую таблицу.
+ */
+export function buildPhaseStandingsCache(
+  format: TournamentFormat,
+  participants: TournamentParticipant[],
+  standingsSource: StandingsMatch[] | undefined,
+  placements: MatchPlacement[] | undefined,
+  savedGroups: TournamentGroup[] | undefined,
+): PhaseStandingsCache {
+  const cache: PhaseStandingsCache = new Map()
+  for (const phase of format.phases) {
+    if (phase.type !== 'roundRobin') continue
+    const p = phase as unknown as { seeding?: { groups?: unknown } }
+    const rr = phase as TournamentFormat['phases'][0] & { type: 'roundRobin' }
+    const assignments = p.seeding?.groups
+      ? assignGroupsFromExplicitSeeding(rr, cache)
+      : resolvePhaseGroups(rr, participants, savedGroups)
+    const standings = standingsSource
+      ? calculateGroupStandings(phase, assignments, matchesOfPhase(phase.id, standingsSource, placements))
+      : assignments.map(() => [])
+    cache.set(phase.id, { assignments, standings })
+  }
+  return cache
+}
+
+/**
+ * Участники слотов SE-фазы — или `undefined`, пока плейофф не начался.
+ *
+ * Гейт нужен, потому что до первой сыгранной встречи источника таблицы нулевые
+ * и посев из них — выдумка: сетка обязана показывать пустые слоты, а не
+ * случайный порядок. Размещённая фаза говорит о себе сама (B-5), для турниров
+ * без размещений остаётся проверка «встреча этой пары существует».
+ */
+export function resolveSESlotIds(
+  phase: TournamentFormat['phases'][0] & { type: 'singleElimination' },
+  cache: PhaseStandingsCache,
+  standingsSource: StandingsMatch[] | undefined,
+  placements: MatchPlacement[] | undefined,
+): (string | null)[] | undefined {
+  const p = phase as unknown as { seeding?: { from?: string } }
+  const from = p.seeding?.from
+  if (!standingsSource || !from) return undefined
+
+  const cached = cache.get(from)
+  if (!cached) return undefined
+
+  const candidateIds = resolvePlayoffSlots(phase, cached.standings)
+  const started = hasPhasePlacements(phase.id, placements) || candidateIds.some((id, i) => {
+    if (i % 2 !== 0) return false
+    const f1 = id, f2 = candidateIds[i + 1]
+    if (!f1 || !f2) return false
+    return standingsSource.some(m =>
+      (m.fighter1Id === f1 && m.fighter2Id === f2) ||
+      (m.fighter1Id === f2 && m.fighter2Id === f1),
+    )
+  })
+  return started ? candidateIds : undefined
+}
+
+/** Пары обеих сеток DE и серия гранд-финала из кэша таблиц фазы-источника. */
+export function resolveDEFromCache(
+  phase: DEPhase,
+  cache: PhaseStandingsCache,
+  allMatches: Match[] | undefined,
+  placements: MatchPlacement[] | undefined,
+): {
+  ubPairs?: ([string | null, string | null])[][]
+  lbPairs?: ([string | null, string | null])[][]
+  grandFinal?: GrandFinalSeries<Match>
+} {
+  if (!allMatches) return {}
+  const fromPhaseId = phase.upperBracket.slots[0]?.source?.split('.')?.[0]
+  if (!fromPhaseId) return {}
+  const cached = cache.get(fromPhaseId)
+  if (!cached) return {}
+  return resolveDERoundPairs(phase, cached.standings, allMatches, placements)
+}
+
 // ── Snake seeding ──────────────────────────────────────────────────────────
 // seed 1→A, 2→B, 3→C, 4→D, 5→D, 6→C, 7→B, 8→A, 9→A, ...
 export function assignGroups(

@@ -1,13 +1,12 @@
 import type { Encounter, Match, MatchPlacement, TournamentFormat, TournamentParticipant } from '../../api/types'
 import type { SaveGroupItem, TournamentGroup } from '../../api/groups'
 import {
-  assignGroupsFromExplicitSeeding, buildSwissPool, resolvePhaseGroups,
+  buildPhaseStandingsCache, buildSwissPool,
   buildBracketRounds, calculateGroupStandings, encountersToStandingsMatches,
-  hasPhasePlacements, matchesOfPhase,
-  resolvePlayoffSlots, resolveDERoundPairs,
+  matchesOfPhase, resolveDEFromCache, resolveSESlotIds,
   type PhaseStandingsCache,
 } from './bracketUtils'
-import type { DEPhase, GrandFinalSeries } from './bracketUtils'
+import type { DEPhase } from './bracketUtils'
 import RoundRobinPhaseView from './RoundRobinPhaseView'
 import SingleEliminationView from './SingleEliminationView'
 import DoubleEliminationView from './DoubleEliminationView'
@@ -42,22 +41,12 @@ export default function TournamentBracketView({
   const isTeam = participants[0]?.kind === 'Team'
   const standingsSource = isTeam ? encountersToStandingsMatches(encounters ?? []) : allMatches
 
-  // Build standings cache for all roundRobin phases in declaration order so that
-  // explicit-seeded phases (seeding.groups) can resolve participants from earlier phases.
-  const standingsCache: PhaseStandingsCache = new Map()
-  for (const phase of format.phases) {
-    if (phase.type !== 'roundRobin') continue
-    const p = phase as any
-    const assignments = p.seeding?.groups
-      ? assignGroupsFromExplicitSeeding(phase as any, standingsCache)
-      : resolvePhaseGroups(phase as any, participants, savedGroups)
-    // Только встречи, размещённые в этой фазе: переигровка одногруппников в
-    // плейофф не должна задним числом двигать групповую таблицу (Д-3).
-    const standings = standingsSource
-      ? calculateGroupStandings(phase, assignments, matchesOfPhase(phase.id, standingsSource, placements))
-      : assignments.map(() => [])
-    standingsCache.set(phase.id, { assignments, standings })
-  }
+  // Составы и таблицы всех roundRobin-фаз (в порядке объявления, чтобы фаза с
+  // явным посевом резолвилась из предыдущих). Общий с табло для зала расчёт —
+  // см. `buildPhaseStandingsCache`.
+  const standingsCache: PhaseStandingsCache = buildPhaseStandingsCache(
+    format, participants, standingsSource, placements, savedGroups,
+  )
 
   return (
     <div>
@@ -118,26 +107,9 @@ export default function TournamentBracketView({
 
         if (phase.type === 'singleElimination') {
           const p = phase as any
-          let resolvedIds: (string | null)[] | undefined
-          if (standingsSource && p.seeding?.from) {
-            const cached = standingsCache.get(p.seeding.from as string)
-            if (cached) {
-              const candidateIds = resolvePlayoffSlots(phase as any, cached.standings)
-              // Размещённая фаза говорит о себе сама; для старых турниров
-              // остаётся прежняя проверка «есть встреча этой пары».
-              const hasPlayoffMatches = hasPhasePlacements(phase.id, placements) || candidateIds.some((id, i) => {
-                if (i % 2 !== 0) return false
-                const f1 = id, f2 = candidateIds[i + 1]
-                if (!f1 || !f2) return false
-                return standingsSource.some(m =>
-                  (m.fighter1Id === f1 && m.fighter2Id === f2) ||
-                  (m.fighter1Id === f2 && m.fighter2Id === f1)
-                )
-              })
-              if (hasPlayoffMatches) resolvedIds = candidateIds
-            }
-          }
-          const rounds = buildBracketRounds(phase as any, resolvedIds, participants, standingsSource, placements)
+          const se = phase as TournamentFormat['phases'][0] & { type: 'singleElimination' }
+          const resolvedIds = resolveSESlotIds(se, standingsCache, standingsSource, placements)
+          const rounds = buildBracketRounds(se, resolvedIds, participants, standingsSource, placements)
           return (
             <SingleEliminationView
               key={phase.id}
@@ -169,21 +141,8 @@ export default function TournamentBracketView({
 
         if (phase.type === 'doubleElimination') {
           const dePhase = phase as unknown as DEPhase
-          let ubPairs: ([string | null, string | null])[][] | undefined
-          let lbPairs: ([string | null, string | null])[][] | undefined
-          let grandFinal: GrandFinalSeries<Match> | undefined
-          if (allMatches) {
-            const fromPhaseId = dePhase.upperBracket.slots[0]?.source?.split('.')?.[0]
-            if (fromPhaseId) {
-              const cached = standingsCache.get(fromPhaseId)
-              if (cached) {
-                const resolved = resolveDERoundPairs(dePhase, cached.standings, allMatches, placements)
-                ubPairs = resolved.ubPairs
-                lbPairs = resolved.lbPairs
-                grandFinal = resolved.grandFinal
-              }
-            }
-          }
+          const { ubPairs, lbPairs, grandFinal } =
+            resolveDEFromCache(dePhase, standingsCache, allMatches, placements)
           return (
             <DoubleEliminationView
               key={phase.id}

@@ -20,6 +20,15 @@ import {
   GRAND_FINAL_RESET_ROUND_ID, GRAND_FINAL_ROUND_ID, THIRD_PLACE_ROUND_ID,
 } from '../components/bracket/bracketUtils'
 
+// Экраны табло, кроме боя. Порядок и подписи совпадают с `BOARD_VIEWS`
+// (BoardFrame): там это клавиши 1–5, здесь — ссылки.
+const DISPLAY_BOARDS = [
+  { path: '/info', label: '🖵 Заставка', title: 'Название турнира и номинация — для перерывов' },
+  { path: '/list', label: '🖵 Участники', title: 'Список участников на весь экран' },
+  { path: '/groups', label: '🖵 Группы', title: 'Составы групп и положение в них' },
+  { path: '/bracket', label: '🖵 Сетка', title: 'Сетка плейофф на весь экран' },
+]
+
 // Flow: Draft (формат/участники/группы) → Scheduled (бои сгенерированы, группы
 // заблокированы) → Active (бои идут). Откаты к Draft удаляют бои на сервере и
 // требуют подтверждения.
@@ -915,6 +924,20 @@ export default function TournamentDetailPage() {
         >
           🖵 Табло для зала
         </a>
+        {/* Остальные экраны зала: на самом табло они переключаются клавишами
+            1–5 и стрелками, но открыть сразу нужный тоже надо уметь. */}
+        {DISPLAY_BOARDS.map(b => (
+          <a
+            key={b.path}
+            href={`/display/tournament/${tournament.id}${b.path}`}
+            target="_blank"
+            rel="noopener"
+            title={b.title}
+            style={{ color: '#aaa', fontSize: '0.85em', whiteSpace: 'nowrap' }}
+          >
+            {b.label}
+          </a>
+        ))}
       </div>
       {tournament.nomination && <p>Номинация: {tournament.nomination}</p>}
       {tournament.description && <p>{tournament.description}</p>}
