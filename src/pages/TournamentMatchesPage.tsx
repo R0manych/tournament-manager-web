@@ -3,8 +3,9 @@ import { Link, useParams } from 'react-router-dom'
 import { tournamentsApi } from '../api/tournaments'
 import { matchesApi } from '../api/matches'
 import EncountersSection from '../components/EncountersSection'
-import type { Match, MatchStatus, TournamentParticipant } from '../api/types'
+import type { Match, MatchStatus, TournamentFormat, TournamentParticipant } from '../api/types'
 import { participantName } from '../api/types'
+import { comparePlacements, describePlacement } from '../components/bracket/bracketUtils'
 
 // Типизировано по `MatchStatus` намеренно: с `Record<string, string>` новый
 // статус отрисовался бы пустой строкой, и компилятор бы промолчал.
@@ -26,12 +27,23 @@ const STATUS_COLOR: Record<MatchStatus, string> = {
   DoubleLoss: '#b3261e',
 }
 
-function MatchRow({ match, participants }: { match: Match; participants: TournamentParticipant[] }) {
+function MatchRow({
+  match,
+  participants,
+  format,
+}: {
+  match: Match
+  participants: TournamentParticipant[]
+  format: TournamentFormat | undefined
+}) {
   const isBye = match.fighter2Id == null
   const f1 = participants.find(p => p.participantId === match.fighter1Id)
   const f2 = participants.find(p => p.participantId === match.fighter2Id)
   const n1 = f1 ? participantName(f1) : match.fighter1Id.slice(0, 8)
   const n2 = isBye ? '— (бай)' : (f2 ? participantName(f2) : (match.fighter2Id ?? '').slice(0, 8))
+  // Ячейки нет у встреч, заведённых вручную, и у турниров, созданных до
+  // размещений (инвариант 46) — тогда стадия неизвестна, и врать о ней нельзя.
+  const where = describePlacement(match.placement, format)
 
   return (
     <tr>
@@ -47,6 +59,16 @@ function MatchRow({ match, participants }: { match: Match; participants: Tournam
       </td>
       <td style={{ ...TD, color: isBye ? '#aaa' : undefined }}>
         {isBye ? n2 : <Link to={`/matches/${match.id}`}>{n2}</Link>}
+      </td>
+      <td style={{ ...TD, whiteSpace: 'nowrap' }}>
+        {where ? (
+          <span title={`${where.phase} · ${where.cell} · пара ${where.pair}`}>
+            {where.cell}
+            <span style={{ color: '#888', fontSize: '0.85em' }}> · {where.phase}</span>
+          </span>
+        ) : (
+          <span style={{ color: '#bbb' }}>—</span>
+        )}
       </td>
       <td style={{ ...TD, color: STATUS_COLOR[match.status] ?? '#888', whiteSpace: 'nowrap' }}>
         {STATUS_LABEL[match.status] ?? match.status}
@@ -79,6 +101,16 @@ export default function TournamentMatchesPage() {
     enabled: !!id && tournament != null && !isTeam,
   })
 
+  // Формат даёт имена фазам и раундам: в размещении встречи лежат только их id.
+  // 404 — законный ответ (формат не загружен), повторять запрос незачем.
+  const { data: format } = useQuery({
+    queryKey: ['tournament-format', id],
+    queryFn: () => tournamentsApi.format.get(id!),
+    enabled: !!id && tournament != null && !isTeam,
+    retry: (failureCount, error: unknown) =>
+      (error as { status?: number })?.status !== 404 && failureCount < 2,
+  })
+
   if (tLoading) return <p>Загрузка...</p>
   if (!tournament) return <p>Турнир не найден</p>
 
@@ -98,15 +130,22 @@ export default function TournamentMatchesPage() {
 
   if (mLoading) return <p>Загрузка...</p>
 
-  const scheduled = matches?.filter(m => m.status === 'Scheduled') ?? []
-  const inProgress = matches?.filter(m => m.status === 'InProgress') ?? []
+  // Порядок внутри каждой секции — по месту в сетке: групповой этап группами,
+  // плейофф по раундам, внутри раунда по номеру пары. Встречи без ячейки уходят
+  // в конец и держат прежний порядок по времени (`sort` в JS стабилен).
+  const byTime = [...(matches ?? [])].sort((a, b) =>
+    (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt)
+  )
+  const ordered = byTime.sort((a, b) => comparePlacements(a.placement, b.placement, format))
+
+  const scheduled = ordered.filter(m => m.status === 'Scheduled')
+  const inProgress = ordered.filter(m => m.status === 'InProgress')
   // Двойное поражение — завершённая встреча (АР-16), иначе она навсегда
   // осталась бы в незавершённых.
-  const completed =
-    matches?.filter(
-      m => m.status === 'Completed' || m.status === 'WalkoverWin' || m.status === 'DoubleLoss'
-    ) ?? []
-  const cancelled = matches?.filter(m => m.status === 'Cancelled') ?? []
+  const completed = ordered.filter(
+    m => m.status === 'Completed' || m.status === 'WalkoverWin' || m.status === 'DoubleLoss'
+  )
+  const cancelled = ordered.filter(m => m.status === 'Cancelled')
 
   const groups: Array<{ label: string; items: Match[] }> = [
     { label: 'В процессе', items: inProgress },
@@ -142,6 +181,7 @@ export default function TournamentMatchesPage() {
                   <th style={TH}>Боец 1</th>
                   <th style={{ ...TH, textAlign: 'center' }}>Счёт</th>
                   <th style={TH}>Боец 2</th>
+                  <th style={TH}>Стадия</th>
                   <th style={TH}>Статус</th>
                   <th style={TH}>Время</th>
                   <th style={TH} />
@@ -149,7 +189,12 @@ export default function TournamentMatchesPage() {
               </thead>
               <tbody>
                 {group.items.map(m => (
-                  <MatchRow key={m.id} match={m} participants={tournament.participants} />
+                  <MatchRow
+                    key={m.id}
+                    match={m}
+                    participants={tournament.participants}
+                    format={format}
+                  />
                 ))}
               </tbody>
             </table>
