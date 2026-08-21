@@ -461,6 +461,13 @@ export default function MatchPage() {
       matchesApi.updateWarnings(id!, f1d, f2d),
     onSuccess: applyUpdated,
   })
+  // Видеоповторы — тот же контракт, что у предупреждений: дельты, зажим в ноль
+  // на сервере, только при `InProgress` (иначе 409).
+  const replayMut = useMutation({
+    mutationFn: ({ f1d, f2d }: { f1d?: number; f2d?: number }) =>
+      matchesApi.updateVideoReplays(id!, f1d, f2d),
+    onSuccess: applyUpdated,
+  })
   const addExchangeMut = useMutation({
     mutationFn: (data: AddExchangeRequest) => matchesApi.addExchange(id!, data),
     onSuccess: (updated) => { setNote(''); applyUpdated(updated) },
@@ -790,6 +797,9 @@ export default function MatchPage() {
               {match.effectiveMaxWarnings != null && ` / ${match.effectiveMaxWarnings}`}
             </div>
           )}
+          {match.videoReplays1 > 0 && (
+            <div style={{ marginTop: 4, fontSize: '0.85em', color: '#888' }}>🎥 {match.videoReplays1}</div>
+          )}
         </div>
 
         <div style={{ textAlign: 'center', minWidth: 140, padding: '0 12px' }}>
@@ -818,6 +828,9 @@ export default function MatchPage() {
               ⚠ {match.warnings2}
               {match.effectiveMaxWarnings != null && ` / ${match.effectiveMaxWarnings}`}
             </div>
+          )}
+          {match.videoReplays2 > 0 && (
+            <div style={{ marginTop: 4, fontSize: '0.85em', color: '#888' }}>🎥 {match.videoReplays2}</div>
           )}
         </div>
       </div>
@@ -945,6 +958,16 @@ export default function MatchPage() {
             <button onClick={() => warnMut.mutate({ f1d: -1 })} disabled={warnMut.isPending || match.warnings1 === 0}>⚠− {short1}</button>
             <button onClick={() => warnMut.mutate({ f2d: 1 })} disabled={warnMut.isPending}>⚠+ {short2}</button>
             <button onClick={() => warnMut.mutate({ f2d: -1 })} disabled={warnMut.isPending || match.warnings2 === 0}>⚠− {short2}</button>
+          </div>
+
+          {/* Видеоповторы. Отдельным рядом от предупреждений: это не санкция, а
+              израсходованный ресурс стороны, и путать их кнопками нельзя. */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '0 0 16px', alignItems: 'center', justifyContent: 'center' }}>
+            <span style={{ color: '#666', fontSize: '0.85em' }}>Видеоповторы:</span>
+            <button onClick={() => replayMut.mutate({ f1d: 1 })} disabled={replayMut.isPending}>🎥+ {short1}</button>
+            <button onClick={() => replayMut.mutate({ f1d: -1 })} disabled={replayMut.isPending || match.videoReplays1 === 0}>🎥− {short1}</button>
+            <button onClick={() => replayMut.mutate({ f2d: 1 })} disabled={replayMut.isPending}>🎥+ {short2}</button>
+            <button onClick={() => replayMut.mutate({ f2d: -1 })} disabled={replayMut.isPending || match.videoReplays2 === 0}>🎥− {short2}</button>
           </div>
 
           {/* Quick score */}
