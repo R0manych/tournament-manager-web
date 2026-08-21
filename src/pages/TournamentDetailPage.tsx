@@ -12,6 +12,7 @@ import TournamentFormatSection from '../components/TournamentFormatSection'
 import TeamsSection from '../components/TeamsSection'
 import EncountersSection from '../components/EncountersSection'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
+import { isProduction } from '../lib/env'
 import {
   buildSwissPool, calculateGroupStandings, createCellLookup, encountersToStandingsMatches,
   grandFinalHint, matchesOfPhase, placementsOf, planSwissNextRound, resolveGrandFinalSeries,
@@ -1013,7 +1014,7 @@ export default function TournamentDetailPage() {
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
         <Link to={`/tournaments/${id}/matches`}>Смотреть все встречи →</Link>
-        {!isTeam && (
+        {!isTeam && !isProduction && (
           <button
             onClick={() => randomResultsMut.mutate()}
             disabled={randomResultsMut.isPending}
@@ -1027,6 +1028,10 @@ export default function TournamentDetailPage() {
 
       {isTeam ? (
         <>
+          {/* Тестовые кнопки — только вне прода (см. lib/env.ts): на живом
+              турнире случайные команды и результаты рядом с настоящими данными
+              это заряженное ружьё. */}
+          {!isProduction && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', margin: '8px 0' }}>
             <span style={{ color: '#999', fontSize: '0.8em' }}>Тест:</span>
             {[4, 8, 16].map(n => (
@@ -1049,6 +1054,7 @@ export default function TournamentDetailPage() {
               {randomTeamResultsMut.isPending ? '…' : '🎲 Случайные результаты'}
             </button>
           </div>
+          )}
           <TeamsSection tournamentId={id!} participants={tournament.participants} />
           <EncountersSection tournamentId={id!} participants={tournament.participants} />
         </>
@@ -1057,7 +1063,7 @@ export default function TournamentDetailPage() {
           <h2>
             Участники ({tournament.participants.length})
             <span style={{ marginLeft: 12, display: 'inline-flex', gap: 6 }}>
-              {[8, 16, 32, 64].map(n => (
+              {!isProduction && [8, 16, 32, 64].map(n => (
                 <button
                   key={n}
                   onClick={() => addRandomFightersMut.mutate(n)}
