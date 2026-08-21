@@ -52,6 +52,8 @@ export const api = {
     requestWithMeta<T>(path, { method: 'PUT', body: formData }),
   patch: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
-  delete: (path: string) => request<void>(path, { method: 'DELETE' }),
+  // Обычный DELETE отвечает 204 (T = void), но `DELETE /exchanges/{id}` отдаёт
+  // пересчитанную встречу — тому, кто её ждёт, нужен типизированный ответ.
+  delete: <T = void>(path: string) => request<T>(path, { method: 'DELETE' }),
   deleteWithMeta: (path: string) => requestWithMeta<void>(path, { method: 'DELETE' }),
 }

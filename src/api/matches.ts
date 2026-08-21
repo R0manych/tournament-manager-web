@@ -31,5 +31,6 @@ export const matchesApi = {
     api.post<Match>(`/matches/${matchId}/exchanges`, data),
   updateExchange: (exchangeId: string, data: AddExchangeRequest) =>
     api.put<Match>(`/exchanges/${exchangeId}`, data),
-  deleteExchange: (exchangeId: string) => api.delete(`/exchanges/${exchangeId}`),
+  // Отвечает встречей с уже пересчитанным счётом (инвариант 1), а не 204.
+  deleteExchange: (exchangeId: string) => api.delete<Match>(`/exchanges/${exchangeId}`),
 }
