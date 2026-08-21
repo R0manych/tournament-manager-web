@@ -9,6 +9,7 @@ import MatchPage from './pages/MatchPage'
 import EncounterPage from './pages/EncounterPage'
 import DisplayMatchPage from './pages/DisplayMatchPage'
 import DisplayTournamentPage from './pages/DisplayTournamentPage'
+import DisplayBoardPage from './pages/DisplayBoardPage'
 import NotFoundPage from './pages/NotFoundPage'
 
 export default function App() {
@@ -18,6 +19,12 @@ export default function App() {
         {/* Табло для зала — вне <Layout>: ни шапки, ни навигации (АР-14). */}
         <Route path="display/match/:id" element={<DisplayMatchPage />} />
         <Route path="display/tournament/:id" element={<DisplayTournamentPage />} />
+        {/* Остальные экраны зала. Адрес — источник истины: табло переживает F5
+            и не зависит от того, открыт ли пульт (переключение — клавиши 1–5). */}
+        <Route path="display/tournament/:id/info" element={<DisplayBoardPage view="info" />} />
+        <Route path="display/tournament/:id/list" element={<DisplayBoardPage view="list" />} />
+        <Route path="display/tournament/:id/groups" element={<DisplayBoardPage view="groups" />} />
+        <Route path="display/tournament/:id/bracket" element={<DisplayBoardPage view="bracket" />} />
         <Route element={<Layout />}>
           <Route index element={<TournamentsPage />} />
           <Route path="admin/tournaments/new" element={<TournamentCreatePage />} />
