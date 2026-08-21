@@ -179,9 +179,6 @@ export default function MatchPage() {
 
   // Exchange entry state
   const [note, setNote] = useState('')
-  const [showCustom, setShowCustom] = useState(false)
-  const [customP1, setCustomP1] = useState(0)
-  const [customP2, setCustomP2] = useState(0)
 
   const { data: match, isLoading } = useQuery({
     queryKey: ['matches', id],
@@ -438,6 +435,66 @@ export default function MatchPage() {
     onSuccess: invalidate,
   })
 
+  // Снятие очков. Счёт — производная от сходов (инвариант 1), а отрицательные
+  // очки сервер не принимает (400, ExchangesController), поэтому «−N» не пишет
+  // корректирующий сход, а откатывает журнал с конца: у последних сходов этой
+  // стороны очки убавляются, а сход, оставшийся пустым (0:0 и не обоюдный),
+  // удаляется. Обоюдные сходы не трогаются — они очков не дают, и снимать их
+  // счётчик судья не просил.
+  const undoScoreMut = useMutation({
+    mutationFn: async ({ side, points }: { side: 1 | 2; points: number }) => {
+      let remaining = points
+      let updated: Match | undefined
+      const fromLast = [...(match?.exchanges ?? [])].sort((a, b) => b.sequence - a.sequence)
+      for (const e of fromLast) {
+        if (remaining === 0) break
+        const own = side === 1 ? e.points1 : e.points2
+        if (own === 0) continue
+        const take = Math.min(own, remaining)
+        const p1 = side === 1 ? e.points1 - take : e.points1
+        const p2 = side === 2 ? e.points2 - take : e.points2
+        // Строго последовательно: каждый ответ — уже пересчитанная встреча,
+        // параллельные правки одного счёта разъехались бы.
+        updated = p1 === 0 && p2 === 0 && !e.isDoubleHit
+          ? await matchesApi.deleteExchange(e.id)
+          : await matchesApi.updateExchange(e.id, {
+              roundNumber: e.roundNumber,
+              points1: p1,
+              points2: p2,
+              isDoubleHit: e.isDoubleHit,
+              note: e.note,
+            })
+        remaining -= take
+      }
+      return updated
+    },
+    onSuccess: (updated) => { if (updated) applyUpdated(updated); else invalidate() },
+  })
+
+  // Снятие обоюдного. Обоюдные очков не дают, они считаются отдельно
+  // (инвариант 2: `DoubleHitsCount = count(Exchanges where IsDoubleHit)`),
+  // поэтому «⚔−» снимает флаг с последнего такого схода, а не убавляет счёт.
+  // Пустой сход (0:0) при этом удаляется целиком, а сход, которому судья
+  // руками проставил очки, остаётся с ними: их отмена — отдельное решение и
+  // отдельная кнопка «−N».
+  const undoDoubleMut = useMutation({
+    mutationFn: async () => {
+      const last = [...(match?.exchanges ?? [])]
+        .sort((a, b) => b.sequence - a.sequence)
+        .find(e => e.isDoubleHit)
+      if (!last) return undefined
+      if (last.points1 === 0 && last.points2 === 0) return matchesApi.deleteExchange(last.id)
+      return matchesApi.updateExchange(last.id, {
+        roundNumber: last.roundNumber,
+        points1: last.points1,
+        points2: last.points2,
+        isDoubleHit: false,
+        note: last.note,
+      })
+    },
+    onSuccess: (updated) => { if (updated) applyUpdated(updated); else invalidate() },
+  })
+
   // Каждое изменение сдвига пишем сразу в точке изменения, а не эффектом:
   // эффект в том же коммите видел бы ещё старое состояние и затирал бы запись,
   // которую только что восстановила вторая вкладка.
@@ -470,6 +527,10 @@ export default function MatchPage() {
       note: note || undefined,
     })
   }
+
+  // Начисление и снятие правят один и тот же журнал сходов — пока летит одно,
+  // второе недоступно, иначе «−1» посчитается по устаревшему списку.
+  const scoreBusy = addExchangeMut.isPending || undoScoreMut.isPending || undoDoubleMut.isPending
 
   if (isLoading) return <p>Загрузка...</p>
   if (!match) return <p>Встреча не найдена</p>
@@ -789,22 +850,47 @@ export default function MatchPage() {
                     <button
                       key={p}
                       onClick={() => quickScore(p, 0)}
-                      disabled={addExchangeMut.isPending}
+                      disabled={scoreBusy}
                       style={BTN_SCORE}
                     >
                       +{p}
                     </button>
                   ))}
                 </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  {[1, 2, 3].map(p => (
+                    <button
+                      key={p}
+                      onClick={() => undoScoreMut.mutate({ side: 1, points: p })}
+                      disabled={scoreBusy || match.score1 < p}
+                      title={`Снять ${p} у «${short1}»`}
+                      style={BTN_SCORE_MINUS}
+                    >
+                      −{p}
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              <button
-                onClick={() => quickScore(0, 0, true)}
-                disabled={addExchangeMut.isPending}
-                style={{ ...BTN_SCORE, background: '#f0e6ff', minWidth: 90, fontSize: '0.95em' }}
-              >
-                ⚔ Обоюдный
-              </button>
+              <div style={{ textAlign: 'center' }}>
+                <button
+                  onClick={() => quickScore(0, 0, true)}
+                  disabled={scoreBusy}
+                  style={{ ...BTN_SCORE, background: '#f0e6ff', minWidth: 90, fontSize: '0.95em' }}
+                >
+                  ⚔ Обоюдный
+                </button>
+                <div style={{ marginTop: 6 }}>
+                  <button
+                    onClick={() => undoDoubleMut.mutate()}
+                    disabled={scoreBusy || match.doubleHitsCount === 0}
+                    title="Снять последний обоюдный"
+                    style={{ ...BTN_SCORE_MINUS, minWidth: 90, width: '100%' }}
+                  >
+                    ⚔−
+                  </button>
+                </div>
+              </div>
 
               <div style={{ textAlign: 'center' }}>
                 <div style={{ fontSize: '0.85em', color: '#555', marginBottom: 6, fontWeight: 600 }}>{short2}</div>
@@ -813,10 +899,23 @@ export default function MatchPage() {
                     <button
                       key={p}
                       onClick={() => quickScore(0, p)}
-                      disabled={addExchangeMut.isPending}
+                      disabled={scoreBusy}
                       style={BTN_SCORE}
                     >
                       +{p}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  {[1, 2, 3].map(p => (
+                    <button
+                      key={p}
+                      onClick={() => undoScoreMut.mutate({ side: 2, points: p })}
+                      disabled={scoreBusy || match.score2 < p}
+                      title={`Снять ${p} у «${short2}»`}
+                      style={BTN_SCORE_MINUS}
+                    >
+                      −{p}
                     </button>
                   ))}
                 </div>
@@ -831,57 +930,11 @@ export default function MatchPage() {
                 onChange={e => setNote(e.target.value)}
                 style={{ flex: 1, fontSize: '0.9em' }}
               />
-              {addExchangeMut.isError && (
+              {(addExchangeMut.isError || undoScoreMut.isError || undoDoubleMut.isError) && (
                 <span style={{ color: 'var(--c-danger)', fontSize: '0.85em' }}>Ошибка</span>
               )}
             </div>
 
-            {/* Custom score form */}
-            <div style={{ marginTop: 10 }}>
-              <button
-                onClick={() => setShowCustom(v => !v)}
-                style={{ fontSize: '0.8em', background: 'none', border: 'none', cursor: 'pointer', color: '#888', padding: 0 }}
-              >
-                {showCustom ? '▲' : '▼'} Произвольные очки
-              </button>
-              {showCustom && (
-                <form
-                  onSubmit={e => {
-                    e.preventDefault()
-                    addExchangeMut.mutate({
-                      roundNumber: match.currentRoundNumber,
-                      points1: customP1,
-                      points2: customP2,
-                      isDoubleHit: false,
-                      note: note || undefined,
-                    })
-                    setCustomP1(0)
-                    setCustomP2(0)
-                  }}
-                  style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 }}
-                >
-                  <label style={{ fontSize: '0.9em' }}>
-                    {short1}:{' '}
-                    <input
-                      type="number" min={0} value={customP1}
-                      onChange={e => setCustomP1(+e.target.value)}
-                      style={{ width: 52 }}
-                    />
-                  </label>
-                  <label style={{ fontSize: '0.9em' }}>
-                    {short2}:{' '}
-                    <input
-                      type="number" min={0} value={customP2}
-                      onChange={e => setCustomP2(+e.target.value)}
-                      style={{ width: 52 }}
-                    />
-                  </label>
-                  <button type="submit" disabled={addExchangeMut.isPending} style={{ fontSize: '0.9em' }}>
-                    Добавить
-                  </button>
-                </form>
-              )}
-            </div>
           </div>
         </>
       )}
@@ -985,6 +1038,17 @@ const BTN_SCORE: React.CSSProperties = {
   cursor: 'pointer',
   border: '1px solid #ddd',
   background: '#fff',
+}
+
+// Снятие — исправление ошибки, а не основное действие судьи: та же ширина и
+// форма, что у «+N», но ниже и красным, чтобы под таймером не промахиваться.
+const BTN_SCORE_MINUS: React.CSSProperties = {
+  ...BTN_SCORE,
+  padding: '6px 14px',
+  fontSize: '1em',
+  color: '#b3261e',
+  borderColor: '#e6c9c6',
+  background: '#fff8f7',
 }
 
 const BTN_PRIMARY: React.CSSProperties = {
