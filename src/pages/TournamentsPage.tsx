@@ -22,7 +22,12 @@ export default function TournamentsPage() {
         {tournaments?.map(t => (
           <li key={t.id}>
             <Link to={`/tournaments/${t.id}`}>
-              {t.name} — {t.status}
+              {t.name}
+              {/* Номинация опциональна: разделитель рисуем только вместе с ней,
+                  иначе в списке останутся висящие точки. */}
+              {t.nomination && <span style={{ color: '#888' }}> · {t.nomination}</span>}
+              {' — '}
+              {t.status}
             </Link>
           </li>
         ))}
