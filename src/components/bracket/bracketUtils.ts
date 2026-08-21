@@ -215,6 +215,135 @@ export function comparePlacements(
   return a.slotIndex - b.slotIndex
 }
 
+// ── Порядок проведения боёв ────────────────────────────────────────────────
+// Генератор группового этапа перебирает пары вложенными циклами (`i < j`), и
+// `slotIndex` идёт в том же порядке: в группе из пяти первый боец дерётся четыре
+// боя подряд, последний заканчивает двумя подряд. Сам `slotIndex` менять нельзя
+// — это адрес ячейки, по нему резолвится сетка (B-5), — но и читать список в
+// этом порядке организатору незачем.
+//
+// Очередь строится жадно: следующим идёт бой, у которого дольше всех отдыхал
+// тот из двоих, кто отдыхал меньше. Ещё не выходившие считаются отдыхавшими
+// бесконечно, при равенстве побеждает исходный порядок ячеек — поэтому
+// результат детерминирован и одинаков во всех вкладках. Это то же требование,
+// что у таймера (B-3): список встреч и табло обязаны звать одну функцию, иначе
+// «следующая пара» в зале разойдётся с тем, что читает организатор.
+//
+// Переставляются только бои внутри одной ячейки. В плейофф и в туре швейцарки
+// участники в пределах раунда не повторяются, поэтому там функция тождественна
+// и порядок пар остаётся тем, что задала сетка.
+
+export interface OrderableMatch {
+  id: string
+  fighter1Id: string
+  fighter2Id?: string
+  placement?: MatchPlacementRef
+}
+
+// Ключ раунда — тот же JSON, что и у ячейки: метка группы это свободный текст.
+const roundKey = (p: MatchPlacementRef) => JSON.stringify([p.phaseId, p.roundId])
+
+// Бай — одна сторона: у встречи без соперника отдых считается по одному бойцу.
+const sidesOf = (m: OrderableMatch): string[] =>
+  m.fighter2Id ? [m.fighter1Id, m.fighter2Id] : [m.fighter1Id]
+
+/** Сколько боёв прошло с прошлого выхода того из двоих, кто отдыхал меньше. */
+function restBefore(m: OrderableMatch, lastAt: Map<string, number>, at: number): number {
+  let rest = Infinity
+  for (const side of sidesOf(m)) {
+    const last = lastAt.get(side)
+    if (last !== undefined) rest = Math.min(rest, at - last)
+  }
+  return rest
+}
+
+function balanceCell(items: OrderableMatch[]): OrderableMatch[] {
+  const pending = [...items]
+  const queued: OrderableMatch[] = []
+  const lastAt = new Map<string, number>()
+
+  // Сколько боёв у бойца ещё впереди. Второй критерий выбора: при равном отдыхе
+  // вперёд идёт бой тех, кому осталось больше, — иначе загруженные бойцы
+  // скапливаются в хвосте и там стык неизбежен. Без этого критерия группа из
+  // пяти (20 бойцов на 4 группы — обычный расклад) заканчивалась двумя боями
+  // одного бойца подряд, с ним стыков не остаётся ни при каком n ≥ 5.
+  const left = new Map<string, number>()
+  for (const m of pending) {
+    for (const side of sidesOf(m)) left.set(side, (left.get(side) ?? 0) + 1)
+  }
+  const ahead = (m: OrderableMatch) =>
+    sidesOf(m).reduce((sum, side) => sum + (left.get(side) ?? 0), 0)
+
+  while (pending.length > 0) {
+    const at = queued.length
+    let bestIdx = 0
+    let bestRest = -1
+    let bestAhead = -1
+    for (let i = 0; i < pending.length; i++) {
+      const rest = restBefore(pending[i], lastAt, at)
+      if (rest < bestRest) continue
+      const remaining = ahead(pending[i])
+      // Строгие сравнения: при полном равенстве остаётся исходный порядок ячеек,
+      // поэтому очередь детерминирована.
+      if (rest > bestRest || remaining > bestAhead) {
+        bestRest = rest
+        bestAhead = remaining
+        bestIdx = i
+      }
+    }
+    const [picked] = pending.splice(bestIdx, 1)
+    for (const side of sidesOf(picked)) {
+      lastAt.set(side, at)
+      left.set(side, (left.get(side) ?? 1) - 1)
+    }
+    queued.push(picked)
+  }
+  return queued
+}
+
+/**
+ * Очередь боёв: id встречи → её номер внутри своей ячейки, 1-based.
+ * Неразмещённых встреч в карте нет — про них неизвестно, к какой ячейке они
+ * относятся (инвариант 46), и очередь им не назначается.
+ *
+ * Считать нужно по **всем** встречам ячейки сразу, независимо от статуса:
+ * очередь — свойство группы, а не текущей выборки. Если посчитать отдельно по
+ * запланированным и отдельно по завершённым, номера разъедутся.
+ */
+export function buildBoutOrder(matches: OrderableMatch[]): Map<string, number> {
+  const cells = new Map<string, OrderableMatch[]>()
+  for (const m of matches) {
+    if (!m.placement) continue
+    const key = roundKey(m.placement)
+    const list = cells.get(key)
+    if (list) list.push(m)
+    else cells.set(key, [m])
+  }
+
+  const order = new Map<string, number>()
+  for (const items of cells.values()) {
+    items.sort((a, b) => a.placement!.slotIndex - b.placement!.slotIndex)
+    balanceCell(items).forEach((m, i) => order.set(m.id, i + 1))
+  }
+  return order
+}
+
+/**
+ * Порядок проведения: фаза → раунд → номер боя в очереди. Отличается от
+ * `comparePlacements` только последней ступенью — вместо адреса ячейки берётся
+ * место в очереди.
+ */
+export function compareBoutOrder(
+  a: OrderableMatch,
+  b: OrderableMatch,
+  format: TournamentFormat | null | undefined,
+  order: Map<string, number>,
+): number {
+  const key = (m: OrderableMatch): MatchPlacementRef | undefined =>
+    m.placement && { ...m.placement, slotIndex: order.get(m.id) ?? m.placement.slotIndex }
+  return comparePlacements(key(a), key(b), format)
+}
+
 export function describePlacement(
   placement: MatchPlacementRef | undefined,
   format: TournamentFormat | null | undefined,

@@ -5,8 +5,9 @@ import { fightersApi } from '../../api/fighters'
 import { matchesApi } from '../../api/matches'
 import { teamsApi } from '../../api/teams'
 import { tournamentsApi } from '../../api/tournaments'
-import type { Encounter, Match, Team, Tournament } from '../../api/types'
+import type { Encounter, Match, Team, Tournament, TournamentFormat } from '../../api/types'
 import { participantName } from '../../api/types'
+import { buildBoutOrder, compareBoutOrder } from '../bracket/bracketUtils'
 import { formatClock, formatCountdown, remainingSeconds, remainingUntil } from '../../lib/timer'
 import { readTimerOffset, timerOffsetKey } from '../../lib/timerOffset'
 import type { TimerOffset } from '../../lib/timerOffset'
@@ -62,6 +63,17 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
     queryKey: ['teams', match?.tournamentId],
     queryFn: () => teamsApi.listByTournament(match!.tournamentId),
     enabled: !!match?.tournamentId && !!match?.encounterId,
+  })
+
+  // Тоже ради «следующей пары»: формат задаёт порядок фаз и раундов, без него
+  // очередь боёв внутри ячейки верна, а вот сами ячейки выстроятся по своим id.
+  // 404 — законный ответ (формат не загружен), повторять запрос незачем.
+  const { data: format } = useQuery({
+    queryKey: ['tournament-format', match?.tournamentId],
+    queryFn: () => tournamentsApi.format.get(match!.tournamentId),
+    enabled: !!match?.tournamentId && !match?.encounterId,
+    retry: (failureCount, error: unknown) =>
+      (error as { status?: number })?.status !== 404 && failureCount < 2,
   })
 
   const [now, setNow] = useState(() => Date.now())
@@ -157,7 +169,7 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
   }
   const expired = seconds != null && totalSeconds != null && seconds === 0
 
-  const nextPair = resolveNextPair({ match, encounter, tournament, tournamentMatches, teams })
+  const nextPair = resolveNextPair({ match, encounter, tournament, tournamentMatches, teams, format })
 
   return (
     <Screen>
@@ -236,7 +248,17 @@ export function WaitingBoard({ tournamentId }: { tournamentId?: string }) {
     refetchInterval: 5000,
   })
 
-  const next = byStartOrder(matches ?? []).find(m => m.status === 'Scheduled')
+  // Тот же порядок, что на карточке боя: экран ожидания обещает залу следующую
+  // пару, и обещание обязано совпасть с тем, что вызовут на ристалище.
+  const { data: format } = useQuery({
+    queryKey: ['tournament-format', tournamentId],
+    queryFn: () => tournamentsApi.format.get(tournamentId!),
+    enabled: !!tournamentId,
+    retry: (failureCount, error: unknown) =>
+      (error as { status?: number })?.status !== 404 && failureCount < 2,
+  })
+
+  const next = byStartOrder(matches ?? [], format).find(m => m.status === 'Scheduled')
   const label = next && tournament ? pairLabel(next, tournament) : null
 
   return (
@@ -369,9 +391,6 @@ function SidePanel({
         minWidth: 0,
       }}
     >
-      <div style={{ fontSize: '3.2vh', color: MUTED, textTransform: 'uppercase', letterSpacing: '0.2vh' }}>
-        {color.label}
-      </div>
       {first && <FitText text={first} maxVh={4.5} style={{ lineHeight: 1.1 }} />}
       <FitText text={last.toUpperCase()} maxVh={8} style={{ fontWeight: 800, lineHeight: 1 }} />
       {club && <FitText text={club} maxVh={3} style={{ color: MUTED }} />}
@@ -435,10 +454,19 @@ function BoutContext({
 
 // ─── Следующая пара ───────────────────────────────────────────────────────────
 
-function byStartOrder(matches: Match[]): Match[] {
-  return [...matches].sort((a, b) =>
-    (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt)
-  )
+// Порядок тот же, что в списке встреч у организатора: очередь боёв внутри
+// ячейки (`buildBoutOrder`), ячейки — по формату. Сортировка по времени
+// осталась запасной ступенью для встреч без размещения: у сгенерированных
+// одним запросом `createdAt` совпадает до миллисекунды, поэтому сама по себе
+// она порядка не задаёт.
+function byStartOrder(
+  matches: Match[],
+  format: TournamentFormat | undefined,
+): Match[] {
+  const order = buildBoutOrder(matches)
+  return [...matches]
+    .sort((a, b) => (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt))
+    .sort((a, b) => compareBoutOrder(a, b, format, order))
 }
 
 function pairLabel(match: Match, tournament: Tournament): string {
@@ -457,8 +485,9 @@ function resolveNextPair(args: {
   tournament?: Tournament
   tournamentMatches?: Match[]
   teams?: Team[]
+  format?: TournamentFormat
 }): string | null {
-  const { match, encounter, tournament, tournamentMatches, teams } = args
+  const { match, encounter, tournament, tournamentMatches, teams, format } = args
 
   // Боут: следующий бой той же серии, имена — из составов команд.
   if (match.encounterId) {
@@ -476,7 +505,7 @@ function resolveNextPair(args: {
   }
 
   if (!tournament || !tournamentMatches) return null
-  const ordered = byStartOrder(tournamentMatches)
+  const ordered = byStartOrder(tournamentMatches, format)
   const idx = ordered.findIndex(m => m.id === match.id)
   const next = ordered.slice(idx + 1).find(m => m.status === 'Scheduled')
   return next ? pairLabel(next, tournament) : null
