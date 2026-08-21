@@ -144,7 +144,12 @@ function GrandFinalBox({ title, match, ubId, lbId, nameOf, dimmed, note }: {
   dimmed?: boolean
   note?: string
 }) {
-  const decided = match?.status === 'Completed' || match?.status === 'WalkoverWin'
+  // При двойном поражении (АР-16) встреча тоже сыграна, но победителя у неё
+  // нет: `winnerId` null, поэтому ни один слот не подсветится.
+  const decided =
+    match?.status === 'Completed' ||
+    match?.status === 'WalkoverWin' ||
+    match?.status === 'DoubleLoss'
   // Порядок слотов встречи совпадает с (UB, LB), но подстраховываемся: встречу
   // мог завести вручную кто угодно.
   const swapped = match != null && match.fighter1Id === lbId && match.fighter2Id === ubId

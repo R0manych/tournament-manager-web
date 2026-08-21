@@ -1,6 +1,14 @@
 // Draft → Scheduled (бои сгенерированы, группы заблокированы) → Active (бои идут)
 export type TournamentStatus = 'Draft' | 'Scheduled' | 'Active' | 'Completed' | 'Cancelled'
-export type MatchStatus = 'Scheduled' | 'InProgress' | 'Completed' | 'Cancelled' | 'WalkoverWin'
+// DoubleLoss — двойное техническое поражение (АР-16): победителя нет, обоим
+// засчитывается поражение, счёт и ячейка сетки сохраняются. Это не ничья.
+export type MatchStatus =
+  | 'Scheduled'
+  | 'InProgress'
+  | 'Completed'
+  | 'Cancelled'
+  | 'WalkoverWin'
+  | 'DoubleLoss'
 export type ParticipantKind = 'Fighter' | 'Team'
 
 export interface Fighter {

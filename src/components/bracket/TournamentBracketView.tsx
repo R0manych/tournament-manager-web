@@ -85,8 +85,12 @@ export default function TournamentBracketView({
             const sourceIds = sourceCached
               ? new Set(sourceCached.assignments.flatMap(g => g.participants.map(px => px.fighterId)))
               : new Set<string>()
+            // Двойное поражение (АР-16) тоже меняет таблицу — обоим засчитано
+            // поражение, — значит источник уже «сыграл» и посев не пустой.
             const sourceHasCompleted = standingsSource
-              ? standingsSource.some(m => m.status === 'Completed' && sourceIds.has(m.fighter1Id) && m.fighter2Id != null && sourceIds.has(m.fighter2Id))
+              ? standingsSource.some(m =>
+                  (m.status === 'Completed' || m.status === 'DoubleLoss') &&
+                  sourceIds.has(m.fighter1Id) && m.fighter2Id != null && sourceIds.has(m.fighter2Id))
               : false
 
             if (!sourceHasCompleted) {

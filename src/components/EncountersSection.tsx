@@ -5,20 +5,26 @@ import { encountersApi } from '../api/encounters'
 import { tournamentsApi } from '../api/tournaments'
 import { groupEncountersByGroup, resolvePhaseGroups } from './bracket/bracketUtils'
 import { groupsApi } from '../api/groups'
-import type { Encounter, TournamentParticipant } from '../api/types'
+import type { Encounter, MatchStatus, TournamentParticipant } from '../api/types'
 import { participantName } from '../api/types'
 
-const STATUS_LABEL: Record<string, string> = {
+// Типизировано по `MatchStatus`: с `Record<string, string>` новый статус
+// отрисовался бы пустым, и компилятор бы промолчал.
+const STATUS_LABEL: Record<MatchStatus, string> = {
   Scheduled: 'Запланирована',
   InProgress: 'Идёт',
   Completed: 'Завершена',
   Cancelled: 'Отменена',
+  WalkoverWin: 'Тех. победа',
+  DoubleLoss: 'Двойное поражение',
 }
-const STATUS_COLOR: Record<string, string> = {
+const STATUS_COLOR: Record<MatchStatus, string> = {
   Scheduled: '#888',
   InProgress: '#0077cc',
   Completed: '#080',
   Cancelled: '#aaa',
+  WalkoverWin: '#080',
+  DoubleLoss: '#b3261e',
 }
 
 interface Props {

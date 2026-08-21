@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { encountersApi } from '../api/encounters'
@@ -8,6 +8,7 @@ import { groupEncountersByGroup, resolvePhaseGroups } from '../components/bracke
 import { groupsApi } from '../api/groups'
 import type { Match, MatchStatus, Team } from '../api/types'
 import { participantName } from '../api/types'
+import { openDisplayChannel, parseDisplayMessage, postDisplay } from '../lib/displayChannel'
 
 const BOUT_STATUS_LABEL: Record<MatchStatus, string> = {
   Scheduled: 'Запланирован',
@@ -15,6 +16,7 @@ const BOUT_STATUS_LABEL: Record<MatchStatus, string> = {
   Completed: 'Завершён',
   Cancelled: 'Отменён',
   WalkoverWin: 'Тех. победа',
+  DoubleLoss: 'Двойное поражение',
 }
 const BOUT_STATUS_COLOR: Record<MatchStatus, string> = {
   Scheduled: '#888',
@@ -22,6 +24,9 @@ const BOUT_STATUS_COLOR: Record<MatchStatus, string> = {
   Completed: '#080',
   Cancelled: '#aaa',
   WalkoverWin: '#080',
+  // Отличим и от «завершён» (зелёный), и от «отменён» (серый): бой был, но
+  // результата у него нет.
+  DoubleLoss: '#b3261e',
 }
 
 export default function EncounterPage() {
@@ -69,6 +74,37 @@ export default function EncounterPage() {
     enabled: !!encounter?.tournamentId,
   })
 
+  // Табло (АР-14): пока организатор на карточке серии, «прикреплённый» бой —
+  // текущий боут. Состояние таймера отсюда не вещается: им владеет карточка боя,
+  // а табло без него берёт сдвиг из localStorage (B-3).
+  const shownBoutId = (() => {
+    const sorted = [...(encounter?.bouts ?? [])].sort(
+      (a, b) => (a.boutNumber ?? 0) - (b.boutNumber ?? 0)
+    )
+    return (sorted.find(b => b.status === 'InProgress') ?? sorted.find(b => b.status === 'Scheduled'))?.id
+  })()
+
+  const publishShowRef = useRef<() => void>(() => {})
+  const shownTournamentId = encounter?.tournamentId
+  useEffect(() => {
+    const channel = openDisplayChannel()
+    if (!channel) return
+    const onMessage = (e: MessageEvent) => {
+      if (parseDisplayMessage(e.data)?.type === 'hello') publishShowRef.current()
+    }
+    channel.addEventListener('message', onMessage)
+    publishShowRef.current = () => {
+      if (shownBoutId && shownTournamentId) {
+        postDisplay(channel, { type: 'show', matchId: shownBoutId, tournamentId: shownTournamentId })
+      }
+    }
+    publishShowRef.current()
+    return () => {
+      channel.removeEventListener('message', onMessage)
+      channel.close()
+    }
+  }, [shownBoutId, shownTournamentId])
+
   const invalidate = () => qc.invalidateQueries({ queryKey: ['encounters', id] })
 
   const statusMut = useMutation({
@@ -112,6 +148,7 @@ export default function EncounterPage() {
   const isScheduled = encounter.status === 'Scheduled'
   const isInProgress = encounter.status === 'InProgress'
   const isCompleted = encounter.status === 'Completed'
+  const isDoubleLoss = encounter.status === 'DoubleLoss'
 
   const winnerName =
     encounter.winnerParticipantId === encounter.participant1Id ? name1
@@ -155,7 +192,8 @@ export default function EncounterPage() {
             title={encLabel(nextEnc)}
             style={{
               whiteSpace: 'nowrap',
-              fontWeight: nextEnc.status !== 'Completed' ? 600 : undefined,
+              fontWeight:
+                nextEnc.status !== 'Completed' && nextEnc.status !== 'DoubleLoss' ? 600 : undefined,
               color: nextEnc.status === 'Scheduled' ? '#1976d2'
                 : nextEnc.status === 'InProgress' ? '#2e7d32'
                 : '#888',
@@ -210,7 +248,23 @@ export default function EncounterPage() {
             ✓ Завершить встречу
           </button>
         )}
-        {isCompleted && (
+        {/* Двойное поражение серии целиком (АР-16): обе команды сняты. */}
+        {(isScheduled || isInProgress) && (
+          <button
+            onClick={() => {
+              if (!window.confirm(
+                'Двойное поражение: победителя не будет, поражение засчитается обеим командам. ' +
+                'Счёт серии и сыгранные бои сохранятся. Продолжить?'
+              )) return
+              statusMut.mutate('DoubleLoss')
+            }}
+            disabled={statusMut.isPending}
+            style={{ color: '#b3261e', borderColor: '#b3261e' }}
+          >
+            Двойное поражение
+          </button>
+        )}
+        {(isCompleted || isDoubleLoss) && (
           <button onClick={() => statusMut.mutate('InProgress')} disabled={statusMut.isPending}>
             ↩ Вернуть в активную
           </button>
@@ -218,6 +272,11 @@ export default function EncounterPage() {
       </div>
 
       {/* Winner */}
+      {isDoubleLoss && (
+        <p style={{ textAlign: 'center', fontWeight: 700, fontSize: '1.2em', color: '#b3261e', margin: '0 0 16px' }}>
+          Двойное поражение — победителя нет, поражение засчитано обеим командам
+        </p>
+      )}
       {isCompleted && (
         <p style={{ textAlign: 'center', fontWeight: 700, fontSize: '1.2em', color: winnerName ? '#2e7d32' : '#555', margin: '0 0 16px' }}>
           {winnerName ? `Победитель: ${winnerName}` : 'Ничья'}

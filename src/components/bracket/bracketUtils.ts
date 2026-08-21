@@ -717,6 +717,17 @@ export function grandFinalHint<M extends DecidableMatch>(
       ? `Серия гранд-финала сыграна.${scoreText} Чемпион — ${nameOf(series.championId)}.`
       : `Гранд-финал сыгран. Чемпион — ${nameOf(series.championId)}.`
   }
+  // Двойное поражение (АР-16) — не «ещё не сыгран»: бой был и закончился, но
+  // чемпиона из него не выйдет. Молчать об этом нельзя, серия иначе выглядит
+  // подвисшей без причины.
+  if (series.reset?.status === 'DoubleLoss') {
+    return `Матч-сброс закончился двойным поражением — чемпион не определяется.${scoreText} ` +
+           'Верните встречу в работу и доиграйте либо оставьте серию незакрытой.'
+  }
+  if (series.gf?.status === 'DoubleLoss' && !series.reset) {
+    return 'Гранд-финал закончился двойным поражением — чемпиона нет, и матч-сброс из него не следует. ' +
+           'Верните встречу в работу и доиграйте либо оставьте серию незакрытой.'
+  }
   if (series.reset && !decidedWinner(series.reset)) {
     return series.reset.status === 'Completed'
       ? 'Матч-сброс завершён без победителя — проставьте результат, иначе чемпион не определяется.'
@@ -878,11 +889,22 @@ export function calculateGroupStandings(
         continue
       }
 
-      if (match.status !== 'Completed') continue
+      if (match.status !== 'Completed' && match.status !== 'DoubleLoss') continue
       if (!ids.has(match.fighter1Id) || !ids.has(match.fighter2Id)) continue
 
       const s1 = map.get(match.fighter1Id)!
       const s2 = map.get(match.fighter2Id)!
+
+      // Двойное поражение (АР-16): поражение обоим, и это не ничья. Разница
+      // мячей не начисляется никому — она тай-брейкер спортивной заслуги, а у
+      // боя, прекращённого снятием обоих, её нет: иначе снятый при 8:2 получил
+      // бы преимущество над доигравшим честно. Сам счёт остаётся в протоколе.
+      if (match.status === 'DoubleLoss') {
+        s1.points += ppm.loss; s1.losses++
+        s2.points += ppm.loss; s2.losses++
+        continue
+      }
+
       s1.scoreDiff += match.score1 - match.score2
       s2.scoreDiff += match.score2 - match.score1
 

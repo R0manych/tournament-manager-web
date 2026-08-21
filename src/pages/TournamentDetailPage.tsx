@@ -295,9 +295,23 @@ export default function TournamentDetailPage() {
           return Promise.all(creates.map(req => matchesApi.create(id!, req)))
         }
 
-        const incomplete = pairMatches.filter(m => m && m.status !== 'Completed').length
+        // Двойное поражение — завершённый бой (АР-16), в «незавершённые» не идёт.
+        // Победителя из него нет, поэтому генерация упирается ниже — с указанием
+        // конкретной ячейки, а не общим «проверьте результаты».
+        const incomplete = pairMatches.filter(
+          m => m && m.status !== 'Completed' && m.status !== 'DoubleLoss'
+        ).length
         if (incomplete > 0) {
           throw new Error(`В текущем раунде плейофф ещё ${incomplete} незавершённых боёв. Завершите их, чтобы сформировать следующий раунд.`)
+        }
+
+        const doubleLossAt = pairMatches.findIndex(m => m?.status === 'DoubleLoss')
+        if (doubleLossAt >= 0) {
+          throw new Error(
+            `Ячейка «${round.name ?? round.id}», пара ${doubleLossAt + 1}: двойное поражение — победителя нет, ` +
+            'и следующий раунд из этой ячейки не формируется. Либо верните бой в работу и доиграйте, ' +
+            'либо создайте встречу следующего раунда вручную.'
+          )
         }
 
         if (isFinalRound) {
@@ -398,9 +412,21 @@ export default function TournamentDetailPage() {
           return created.length
         }
 
-        const incomplete = pairEncs.filter(e => e && e.status !== 'Completed').length
+        // Серия с двойным поражением (АР-16) закончена, но победителя не даёт.
+        const incomplete = pairEncs.filter(
+          e => e && e.status !== 'Completed' && e.status !== 'DoubleLoss'
+        ).length
         if (incomplete > 0) {
           throw new Error(`В текущем раунде плейофф ещё ${incomplete} незавершённых встреч. Завершите их, чтобы сформировать следующий раунд.`)
+        }
+
+        const encDoubleLossAt = pairEncs.findIndex(e => e?.status === 'DoubleLoss')
+        if (encDoubleLossAt >= 0) {
+          throw new Error(
+            `Пара ${encDoubleLossAt + 1} текущего раунда: двойное поражение — победителя нет, ` +
+            'и следующий раунд из этой пары не формируется. Либо верните встречу в работу, ' +
+            'либо создайте встречу следующего раунда вручную.'
+          )
         }
 
         if (isFinalRound) {
@@ -551,11 +577,29 @@ export default function TournamentDetailPage() {
       // Helpers. Раунд адресуется своим id, ячейка — индексом пары в раунде.
       const isComplete = (pairs: Pair[], roundId: string): boolean =>
         pairs.every(([f1, f2], i) => lookup.find(roundId, i, f1, f2)?.status === 'Completed')
+      // Двойное поражение — бой законченный (АР-16), «незавершённым» он не
+      // считается. Но и победителя из него нет, поэтому `isComplete` его не
+      // засчитывает, и обход останавливается — с объяснением ниже.
       const hasUnfinished = (pairs: Pair[], roundId: string): boolean =>
         pairs.some(([f1, f2], i) => {
           const m = lookup.find(roundId, i, f1, f2)
-          return !!(m && m.status !== 'Completed')
+          return !!(m && m.status !== 'Completed' && m.status !== 'DoubleLoss')
         })
+
+      const doubleLossCell = (): string | null => {
+        const scan = (rows: Pair[][], rounds: Array<{ id: string; name: string }>) => {
+          for (let ri = 0; ri < rows.length && ri < rounds.length; ri++) {
+            for (let i = 0; i < rows[ri].length; i++) {
+              const [f1, f2] = rows[ri][i]
+              if (lookup.find(rounds[ri].id, i, f1, f2)?.status === 'DoubleLoss') {
+                return `${rounds[ri].name}, пара ${i + 1}`
+              }
+            }
+          }
+          return null
+        }
+        return scan(ubRoundPairs, ubRounds) ?? scan(lbRoundPairs, lbRounds)
+      }
 
       const creates: CreateMatchRequest[] = []
       const generateRound = (pairs: Pair[], roundId: string): boolean => {
@@ -631,9 +675,16 @@ export default function TournamentDetailPage() {
           const p = tournament!.participants.find(x => x.participantId === pid)
           return p ? participantName(p) : pid.slice(0, 8)
         }
+        // Двойное поражение объясняем отдельно: «завершите текущие бои» здесь
+        // сбивает с толку — завершать нечего, из ячейки просто никто не выходит.
+        const stuck = doubleLossCell()
         throw new Error(
           grandFinalHint(gfSeries, nameOf)
-          ?? 'Нет встреч для генерации. Завершите текущие бои, чтобы сформировать следующий раунд.',
+          ?? (stuck
+            ? `Ячейка «${stuck}»: двойное поражение — из неё не выходит ни победитель в верхнюю сетку, ` +
+              'ни проигравший в нижнюю, поэтому сетка дальше не строится. Либо верните бой в работу и ' +
+              'доиграйте, либо создайте встречи следующего раунда вручную.'
+            : 'Нет встреч для генерации. Завершите текущие бои, чтобы сформировать следующий раунд.'),
         )
       }
 
@@ -786,7 +837,10 @@ export default function TournamentDetailPage() {
   const randomTeamResultsMut = useMutation({
     mutationFn: async () => {
       const encs = await encountersApi.listByTournament(id!)
-      const pending = encs.filter(e => e.status !== 'Completed' && e.status !== 'Cancelled')
+      // `DoubleLoss` — терминальный статус (АР-16): такие встречи не доигрываем.
+      const pending = encs.filter(
+        e => e.status !== 'Completed' && e.status !== 'Cancelled' && e.status !== 'DoubleLoss'
+      )
       if (pending.length === 0) throw new Error('Нет незавершённых встреч')
 
       let tieBreaks = 0
@@ -798,7 +852,7 @@ export default function TournamentDetailPage() {
         // mutation response repopulates `bouts`.
         const fresh = await encountersApi.get(enc.id)
         for (const b of fresh.bouts) {
-          if (b.status === 'Completed' || b.status === 'WalkoverWin') continue
+          if (b.status === 'Completed' || b.status === 'WalkoverWin' || b.status === 'DoubleLoss') continue
           if (b.fighter2Id == null) continue // bye — auto-resolved
           await matchesApi.setStatus(b.id, 'InProgress')
           const p1 = Math.floor(Math.random() * 3) + 1
@@ -847,7 +901,20 @@ export default function TournamentDetailPage() {
 
   return (
     <div>
-      <h1>{tournament.name}</h1>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, flexWrap: 'wrap' }}>
+        <h1 style={{ margin: 0 }}>{tournament.name}</h1>
+        {/* Табло для зала (АР-14): вкладка того же браузера на второй монитор.
+            Сама находит текущий бой турнира и слушает пульт. */}
+        <a
+          href={`/display/tournament/${tournament.id}`}
+          target="_blank"
+          rel="noopener"
+          title="Табло, которое следует за организатором этого турнира: показывает бой, открытый на пульте, иначе начатый последним. Для параллельных ристалищ откройте на каждое своё табло с карточки боя."
+          style={{ color: '#888', fontSize: '0.9em', whiteSpace: 'nowrap' }}
+        >
+          🖵 Табло для зала
+        </a>
+      </div>
       {tournament.nomination && <p>Номинация: {tournament.nomination}</p>}
       {tournament.description && <p>{tournament.description}</p>}
 
