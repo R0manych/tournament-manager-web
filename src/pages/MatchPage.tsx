@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { fightersApi } from '../api/fighters'
@@ -29,23 +29,37 @@ function FightTimer({
   totalSeconds,
   paused,
   pauseAccSec,
+  pauseStartedMs,
 }: {
   /** Якорь отсчёта — `currentRoundStartedAt` (ТЗ §7.4). */
   anchorMs: number
   totalSeconds?: number
   paused: boolean
   pauseAccSec: number
+  /** `Date.now()` начала текущей паузы — момент, на который заморожен остаток. */
+  pauseStartedMs: number | null
 }) {
   const [display, setDisplay] = useState(0)
 
   useEffect(() => {
+    // В паузе остаток берётся на её начало, а не на «сейчас»: `pauseAccSec`
+    // текущую паузу ещё не включает. Пока пауза начиналась в этой же вкладке
+    // секунду назад, разницы не было, но восстановленная пауза (F5, возврат
+    // завершённого боя в работу) началась в прошлом — и «сейчас» показало бы
+    // остаток меньше настоящего, вплоть до нуля. Та же логика у табло
+    // (`boardTimerOf`), иначе пульт и зал разойдутся.
     const compute = () =>
-      remainingSeconds({ anchorMs, nowMs: Date.now(), totalSeconds, pauseAccSec })
+      remainingSeconds({
+        anchorMs,
+        nowMs: paused ? (pauseStartedMs ?? Date.now()) : Date.now(),
+        totalSeconds,
+        pauseAccSec,
+      })
     setDisplay(compute())
     if (paused) return
     const id = setInterval(() => setDisplay(compute()), 200)
     return () => clearInterval(id)
-  }, [anchorMs, totalSeconds, paused, pauseAccSec])
+  }, [anchorMs, totalSeconds, paused, pauseAccSec, pauseStartedMs])
 
   // `remainingSeconds` зажимает остаток в ноль, поэтому «время вышло» — это
   // ровно ноль, а не «меньше секунды осталось».
@@ -175,7 +189,10 @@ export default function MatchPage() {
   // Client-side pause state
   const [paused, setPaused] = useState(false)
   const [pauseAcc, setPauseAcc] = useState(0)
-  const pauseStartRef = useRef(0)
+  // Момент начала текущей паузы. Состояние, а не ref: его читает рендер —
+  // остаток в паузе считается на её начало, иначе восстановленная пауза
+  // показывала бы время меньше настоящего (см. FightTimer).
+  const [pauseStartedMs, setPauseStartedMs] = useState<number | null>(null)
 
   // Exchange entry state
   const [note, setNote] = useState('')
@@ -239,6 +256,23 @@ export default function MatchPage() {
   const armedAnchorRef = useRef<number | null>(null)
   const observedRef = useRef(false)
 
+  // Перевзвод «с полного времени»: уже прошедшее с якоря сворачивается в
+  // `pauseAcc`, таймер встаёт в паузу. Одна и та же операция нужна при старте
+  // боя, при возврате в бой без сохранённого сдвига и по кнопке «Сбросить».
+  const armFullTimePaused = useCallback((matchId: string, anchor: number) => {
+    const folded = Math.max(0, (Date.now() - anchor) / 1000)
+    const startedMs = Date.now()
+    setPaused(true)
+    setPauseAcc(folded)
+    setPauseStartedMs(startedMs)
+    writeTimerOffset(matchId, {
+      anchorMs: anchor,
+      pauseAccSec: folded,
+      paused: true,
+      pauseStartedMs: startedMs,
+    })
+  }, [])
+
   // Перевзвод таймера при смене якоря. Правило (B-3): смена якоря в живой
   // вкладке — пауза с полным временем; первое наблюдение (открытие страницы,
   // F5) — восстановление на ходу по ТЗ §7.4.
@@ -248,10 +282,22 @@ export default function MatchPage() {
     observedRef.current = true
 
     if (anchorMs == null) {
-      // Бой не идёт: следующий переход в InProgress считается сменой якоря,
-      // а клиентский сдвиг завершённой встречи никому больше не нужен.
+      // Бой не идёт: следующее появление якоря — снова смена, надо перевзвести.
+      // Сдвиг при этом НЕ стирается: сервер якорь не двигает при «Вернуть в бой»
+      // (инвариант 12), поэтому замороженная запись под тем же якорем — это
+      // единственное место, где живёт остаток на момент «Завершить». Стирание
+      // здесь заодно убивало бы запись пульта в соседней вкладке, которая
+      // узнаёт о завершении из поллинга.
+      // Идущий сдвиг под этот бой — чужой и протухший: его писала эта вкладка,
+      // пока считала бой живым, а «Завершить» нажали в другом браузере, где
+      // заморозка и произошла. Оставить его — значит вернуть бой в работу с
+      // отсчётом от старого якоря, то есть с нулём. Стираем: возврат честно
+      // даст полное время.
+      const armed = armedAnchorRef.current
+      if (armed != null && readTimerOffset(match.id, armed)?.paused === false) {
+        clearTimerOffset(match.id)
+      }
       armedAnchorRef.current = null
-      clearTimerOffset(match.id)
       return
     }
     if (armedAnchorRef.current === anchorMs) return
@@ -267,7 +313,7 @@ export default function MatchPage() {
       setPauseAcc(saved.pauseAccSec)
       // Пауза, начатая до перезагрузки, продолжает копиться: «Продолжить»
       // добавит и время, пока вкладки не было.
-      pauseStartRef.current = saved.pauseStartedMs ?? Date.now()
+      setPauseStartedMs(saved.pauseStartedMs ?? Date.now())
       return
     }
 
@@ -276,25 +322,17 @@ export default function MatchPage() {
       // (§7.3), поэтому восстанавливаем на ходу по ТЗ §7.4.
       setPaused(false)
       setPauseAcc(0)
+      setPauseStartedMs(null)
       writeTimerOffset(match.id, { anchorMs, pauseAccSec: 0, paused: false, pauseStartedMs: null })
       return
     }
-    // Старт боя и «Вернуть в бой»: сворачиваем уже прошедшее
-    // с момента якоря в `pauseAcc`, чтобы раунд начался с полного времени по
-    // «Продолжить». Заодно это гасит расхождение часов клиента и сервера —
-    // работающий таймер считает от момента перевзвода, а не от серверной метки.
-    const folded = Math.max(0, (Date.now() - anchorMs) / 1000)
-    const startedMs = Date.now()
-    setPaused(true)
-    setPauseAcc(folded)
-    pauseStartRef.current = startedMs
-    writeTimerOffset(match.id, {
-      anchorMs,
-      pauseAccSec: folded,
-      paused: true,
-      pauseStartedMs: startedMs,
-    })
-  }, [match, anchorMs])
+    // Старт боя, а также возврат в бой, когда замороженной записи не нашлось
+    // (другой браузер, приватный режим, протухший TTL): сворачиваем уже
+    // прошедшее с якоря, чтобы раунд начался с полного времени по «Продолжить».
+    // Заодно это гасит расхождение часов клиента и сервера — работающий таймер
+    // считает от момента перевзвода, а не от серверной метки.
+    armFullTimePaused(match.id, anchorMs)
+  }, [match, anchorMs, armFullTimePaused])
 
   // Соседняя вкладка того же боя изменила сдвиг (пауза, «Продолжить») —
   // подхватываем. Событие `storage` приходит только в другие вкладки, поэтому
@@ -308,7 +346,7 @@ export default function MatchPage() {
       if (!next) return
       setPaused(next.paused)
       setPauseAcc(next.pauseAccSec)
-      pauseStartRef.current = next.pauseStartedMs ?? Date.now()
+      setPauseStartedMs(next.pauseStartedMs ?? Date.now())
     }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
@@ -358,7 +396,7 @@ export default function MatchPage() {
           totalSeconds: totalFightSeconds,
           paused,
           pauseAccSec: pauseAcc,
-          pauseStartedMs: paused ? pauseStartRef.current : null,
+          pauseStartedMs: paused ? pauseStartedMs : null,
         }),
       })
       if (score != null) {
@@ -379,6 +417,7 @@ export default function MatchPage() {
     totalFightSeconds,
     paused,
     pauseAcc,
+    pauseStartedMs,
     score?.score1,
     score?.score2,
     score?.doubleHitsCount,
@@ -404,6 +443,7 @@ export default function MatchPage() {
       if (updated.status === 'Cancelled') {
         qc.invalidateQueries({ queryKey: ['tournament-matches', updated.tournamentId] })
       }
+      if (updated.status !== 'InProgress') freezeOffset(updated)
       // Взвод таймера живёт в эффекте по смене якоря (см. выше), а не здесь:
       // якорь меняется и при старте боя, и при «Вернуть в бой».
       invalidate()
@@ -503,15 +543,54 @@ export default function MatchPage() {
     writeTimerOffset(match.id, { anchorMs, pauseAccSec, paused, pauseStartedMs })
   }
 
+  // Бой перестал идти. Сервер якорь при «Вернуть в бой» не двигает (инвариант
+  // 12), а остатка не хранит вовсе (АР-1), поэтому остаток на момент
+  // «Завершить» существует только как клиентский сдвиг: замораживаем его
+  // паузой под тем же якорем. Возврат в бой найдёт запись и продолжит с того
+  // же места, а время, пока встреча стояла завершённой, доберётся в `pauseAcc`
+  // механикой обычной паузы. Отменённая встреча в бой не возвращается
+  // (инвариант 16) — её запись только занимает место.
+  function freezeOffset(updated: Match) {
+    if (updated.status === 'Cancelled') {
+      clearTimerOffset(updated.id)
+      return
+    }
+    const iso = updated.currentRoundStartedAt ?? updated.startedAt
+    if (!iso) return   // встреча не начиналась (обоюдная неявка) — замораживать нечего
+    writeTimerOffset(updated.id, {
+      anchorMs: new Date(iso).getTime(),
+      pauseAccSec: pauseAcc,
+      paused: true,
+      pauseStartedMs: paused ? (pauseStartedMs ?? Date.now()) : Date.now(),
+    })
+  }
+
   function handlePause() {
     const startedMs = Date.now()
-    pauseStartRef.current = startedMs
+    setPauseStartedMs(startedMs)
     setPaused(true)
     persistOffset(pauseAcc, true, startedMs)
   }
 
+  // Ручная правка остатка (судья отмерил время не по секундомеру, таймер
+  // запустили позже команды «Бой»). Отдельного поля не заводим: `pauseAcc` и
+  // есть клиентский сдвиг — в него же сворачивается прошедшее при перевзводе.
+  // Поэтому правка автоматически переживает F5, видна соседним вкладкам и
+  // уезжает на табло тем же путём, что пауза.
+  function adjustTimer(deltaSec: number) {
+    if (anchorMs == null || totalFightSeconds == null) return
+    // В паузе точка отсчёта — её начало, как и в самом расчёте остатка.
+    const nowMs = paused ? (pauseStartedMs ?? Date.now()) : Date.now()
+    const wallSec = (nowMs - anchorMs) / 1000
+    // Остаток = total − wall + pauseAcc, поэтому границы «не больше полного
+    // времени» и «не меньше нуля» — это границы для самого сдвига.
+    const next = Math.min(wallSec, Math.max(wallSec - totalFightSeconds, pauseAcc + deltaSec))
+    setPauseAcc(next)
+    persistOffset(next, paused, paused ? pauseStartedMs : null)
+  }
+
   function handleResume() {
-    const acc = pauseAcc + (Date.now() - pauseStartRef.current) / 1000
+    const acc = pauseAcc + (Date.now() - (pauseStartedMs ?? Date.now())) / 1000
     setPauseAcc(acc)
     setPaused(false)
     persistOffset(acc, false, null)
@@ -765,7 +844,21 @@ export default function MatchPage() {
             totalSeconds={totalFightSeconds}
             paused={paused}
             pauseAccSec={pauseAcc}
+            pauseStartedMs={paused ? pauseStartedMs : null}
           />
+        )}
+
+        {/* Ручная правка остатка. Только при заданной длительности: в режиме
+            секундомера (длительность не резолвится) «+10» означало бы обратное. */}
+        {isInProgress && anchorMs != null && totalFightSeconds != null && (
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center', marginTop: 6 }}>
+            <button onClick={() => adjustTimer(-10)} style={BTN_TIME_ADJUST} title="Убавить 10 секунд">
+              −10 с
+            </button>
+            <button onClick={() => adjustTimer(10)} style={BTN_TIME_ADJUST} title="Добавить 10 секунд">
+              +10 с
+            </button>
+          </div>
         )}
 
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center', marginTop: 14 }}>
@@ -786,6 +879,20 @@ export default function MatchPage() {
           {isInProgress && paused && (
             <button onClick={handleResume} style={BTN_PRIMARY}>
               {pauseAcc === 0 ? 'Старт таймера' : 'Продолжить'}
+            </button>
+          )}
+          {/* Возврат в бой продолжает с сохранённого остатка. Если бой надо
+              переиграть с начала, а не доиграть, время возвращается сюда. */}
+          {isInProgress && anchorMs != null && (
+            <button
+              onClick={() => {
+                if (!window.confirm('Сбросить таймер на полное время раунда?')) return
+                armFullTimePaused(match.id, anchorMs)
+              }}
+              style={BTN_SECONDARY}
+              title="Отсчёт начнётся заново с полного времени"
+            >
+              ⟲ Сбросить таймер
             </button>
           )}
           {isInProgress && (
@@ -1049,6 +1156,20 @@ const BTN_SCORE_MINUS: React.CSSProperties = {
   color: '#b3261e',
   borderColor: '#e6c9c6',
   background: '#fff8f7',
+}
+
+// Правка времени стоит вплотную к цифрам таймера, поэтому кнопки нарочито
+// мелкие: промах по ним дешевле промаха по «Стоп».
+const BTN_TIME_ADJUST: React.CSSProperties = {
+  padding: '3px 10px',
+  fontSize: '0.85em',
+  fontWeight: 600,
+  borderRadius: 6,
+  cursor: 'pointer',
+  border: '1px solid #ddd',
+  background: '#fff',
+  color: '#555',
+  fontVariantNumeric: 'tabular-nums',
 }
 
 const BTN_PRIMARY: React.CSSProperties = {
