@@ -7,12 +7,17 @@ import TournamentMatchesPage from './pages/TournamentMatchesPage'
 import FightersPage from './pages/FightersPage'
 import MatchPage from './pages/MatchPage'
 import EncounterPage from './pages/EncounterPage'
+import DisplayMatchPage from './pages/DisplayMatchPage'
+import DisplayTournamentPage from './pages/DisplayTournamentPage'
 import NotFoundPage from './pages/NotFoundPage'
 
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Табло для зала — вне <Layout>: ни шапки, ни навигации (АР-14). */}
+        <Route path="display/match/:id" element={<DisplayMatchPage />} />
+        <Route path="display/tournament/:id" element={<DisplayTournamentPage />} />
         <Route element={<Layout />}>
           <Route index element={<TournamentsPage />} />
           <Route path="admin/tournaments/new" element={<TournamentCreatePage />} />
