@@ -3,23 +3,27 @@ import { Link, useParams } from 'react-router-dom'
 import { tournamentsApi } from '../api/tournaments'
 import { matchesApi } from '../api/matches'
 import EncountersSection from '../components/EncountersSection'
-import type { Match, TournamentParticipant } from '../api/types'
+import type { Match, MatchStatus, TournamentParticipant } from '../api/types'
 import { participantName } from '../api/types'
 
-const STATUS_LABEL: Record<string, string> = {
+// Типизировано по `MatchStatus` намеренно: с `Record<string, string>` новый
+// статус отрисовался бы пустой строкой, и компилятор бы промолчал.
+const STATUS_LABEL: Record<MatchStatus, string> = {
   Scheduled: 'Запланирована',
   InProgress: 'В процессе',
   Completed: 'Завершена',
   Cancelled: 'Отменена',
   WalkoverWin: 'Бай (тех. победа)',
+  DoubleLoss: 'Двойное поражение',
 }
 
-const STATUS_COLOR: Record<string, string> = {
+const STATUS_COLOR: Record<MatchStatus, string> = {
   Scheduled: '#888',
   InProgress: '#0077cc',
   Completed: '#080',
   Cancelled: '#aaa',
   WalkoverWin: '#080',
+  DoubleLoss: '#b3261e',
 }
 
 function MatchRow({ match, participants }: { match: Match; participants: TournamentParticipant[] }) {
@@ -96,7 +100,12 @@ export default function TournamentMatchesPage() {
 
   const scheduled = matches?.filter(m => m.status === 'Scheduled') ?? []
   const inProgress = matches?.filter(m => m.status === 'InProgress') ?? []
-  const completed = matches?.filter(m => m.status === 'Completed' || m.status === 'WalkoverWin') ?? []
+  // Двойное поражение — завершённая встреча (АР-16), иначе она навсегда
+  // осталась бы в незавершённых.
+  const completed =
+    matches?.filter(
+      m => m.status === 'Completed' || m.status === 'WalkoverWin' || m.status === 'DoubleLoss'
+    ) ?? []
   const cancelled = matches?.filter(m => m.status === 'Cancelled') ?? []
 
   const groups: Array<{ label: string; items: Match[] }> = [
