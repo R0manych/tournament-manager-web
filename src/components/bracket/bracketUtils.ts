@@ -1,4 +1,4 @@
-import type { TournamentFormat, TournamentParticipant, Match, Encounter, MatchPlacement } from '../../api/types'
+import type { TournamentFormat, TournamentParticipant, Match, Encounter, MatchPlacement, MatchPlacementRef } from '../../api/types'
 import { participantName } from '../../api/types'
 import type { TournamentGroup } from '../../api/groups'
 
@@ -102,6 +102,130 @@ export function matchesOfPhase<M extends { id: string }>(
   const inPhase = new Set(all.filter(pl => pl.phaseId === phaseId).map(pl => pl.matchId))
   const placedAnywhere = new Set(all.map(pl => pl.matchId))
   return matches.filter(m => inPhase.has(m.id) || !placedAnywhere.has(m.id))
+}
+
+// ── Подпись ячейки ─────────────────────────────────────────────────────────
+// Обратное преобразование к размещению: `(phaseId, roundId, slotIndex)` → то,
+// как эту ячейку называет организатор. Единственный источник имён — формат:
+// `roundId` сам по себе это либо метка группы (roundRobin), либо id раунда из
+// YAML, либо системный id SE, либо `round{N}` швейцарки. Ни одно из них не
+// показывается человеку как есть.
+
+export interface PlacementLabel {
+  /** Имя фазы из формата — «Групповой этап», «Плейофф». */
+  phase: string
+  /** Имя ячейки — «Группа A», «Полуфинал», «Тур 2», «Гранд-финал». */
+  cell: string
+  /** Номер пары внутри раунда, 1-based (в ячейке `slotIndex` считается с нуля). */
+  pair: number
+}
+
+function cellName(
+  phase: TournamentFormat['phases'][0] | undefined,
+  roundId: string,
+): string {
+  if (roundId === GRAND_FINAL_ROUND_ID) return 'Гранд-финал'
+  if (roundId === GRAND_FINAL_RESET_ROUND_ID) return 'Матч-сброс'
+  if (roundId === THIRD_PLACE_ROUND_ID) return 'Матч за 3-е место'
+
+  switch (phase?.type) {
+    case 'roundRobin':
+      // Метка группы — свободный текст организатора. Короткую («A», «2»)
+      // дополняем словом, длинную («Пул новичков») показываем как есть.
+      return /^[0-9A-Za-zА-Яа-яЁё]{1,2}$/.test(roundId) ? `Группа ${roundId}` : roundId
+    case 'swiss': {
+      const n = /^round(\d+)$/.exec(roundId)
+      return n ? `Тур ${n[1]}` : roundId
+    }
+    case 'singleElimination':
+      return seRounds(phase).find(r => r.id === roundId)?.name ?? roundId
+    case 'doubleElimination': {
+      const p = phase as unknown as {
+        upperBracket?: { rounds?: Array<{ id: string; name: string }> }
+        lowerBracket?: { rounds?: Array<{ id: string; name: string }> }
+      }
+      const rounds = [...(p.upperBracket?.rounds ?? []), ...(p.lowerBracket?.rounds ?? [])]
+      return rounds.find(r => r.id === roundId)?.name ?? roundId
+    }
+    default:
+      return roundId
+  }
+}
+
+// Порядок раундов внутри фазы — тот же, в котором их рисует сетка: у SE матч
+// за 3-е место идёт последним (`SingleEliminationView` рисует его под сеткой),
+// у DE сначала верхняя сетка, потом нижняя, потом гранд-финал с матчем-сбросом.
+// У roundRobin и swiss списка нет: метки групп — свободный текст организатора,
+// а туры именуются `round{N}`; и то и другое сравнивается натурально.
+function phaseRoundOrder(phase: TournamentFormat['phases'][0] | undefined): string[] {
+  switch (phase?.type) {
+    case 'singleElimination':
+      return [...seRounds(phase).map(r => r.id), THIRD_PLACE_ROUND_ID]
+    case 'doubleElimination': {
+      const p = phase as unknown as {
+        upperBracket?: { rounds?: Array<{ id: string }> }
+        lowerBracket?: { rounds?: Array<{ id: string }> }
+      }
+      return [
+        ...(p.upperBracket?.rounds ?? []).map(r => r.id),
+        ...(p.lowerBracket?.rounds ?? []).map(r => r.id),
+        GRAND_FINAL_ROUND_ID,
+        GRAND_FINAL_RESET_ROUND_ID,
+      ]
+    }
+    default:
+      return []
+  }
+}
+
+// «Группа 10» после «Группы 2», а не перед ней.
+const naturalOrder = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' })
+
+// Порядок встреч по их месту в сетке: фаза → раунд → номер пары. Неразмещённые
+// уходят в конец — про них неизвестно, куда они относятся (инвариант 46), и
+// придумывать им место в сетке нельзя.
+export function comparePlacements(
+  a: MatchPlacementRef | undefined,
+  b: MatchPlacementRef | undefined,
+  format: TournamentFormat | null | undefined,
+): number {
+  if (!a || !b) return a ? -1 : b ? 1 : 0
+
+  const phases = format?.phases ?? []
+  const phaseIdx = (id: string) => {
+    const i = phases.findIndex(p => p.id === id)
+    return i < 0 ? phases.length : i   // фаза не из формата — после известных
+  }
+  const pa = phaseIdx(a.phaseId)
+  const pb = phaseIdx(b.phaseId)
+  if (pa !== pb) return pa - pb
+  if (a.phaseId !== b.phaseId) return naturalOrder.compare(a.phaseId, b.phaseId)
+
+  const order = phaseRoundOrder(phases[pa])
+  const roundIdx = (id: string) => {
+    const i = order.indexOf(id)
+    return i < 0 ? order.length : i
+  }
+  const ra = roundIdx(a.roundId)
+  const rb = roundIdx(b.roundId)
+  if (ra !== rb) return ra - rb
+  // Оба раунда вне списка (группы, туры швейцарки) — сравниваем сами id.
+  if (a.roundId !== b.roundId) return naturalOrder.compare(a.roundId, b.roundId)
+
+  return a.slotIndex - b.slotIndex
+}
+
+export function describePlacement(
+  placement: MatchPlacementRef | undefined,
+  format: TournamentFormat | null | undefined,
+): PlacementLabel | null {
+  if (!placement) return null
+  const phase = format?.phases.find(p => p.id === placement.phaseId)
+  return {
+    phase: phase?.name ?? placement.phaseId,
+    cell: cellName(phase, placement.roundId),
+    pair: placement.slotIndex + 1,
+  }
 }
 
 // NOTE: `fighterId` here is an opaque participant id — a Fighter.Id in singles
