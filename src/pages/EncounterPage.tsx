@@ -13,6 +13,7 @@ import { setHallBoardMatch, useHallBoardMatchId } from '../components/display/us
 import PisteAssign from '../components/PisteAssign'
 import { usePistes } from '../components/usePistes'
 import { pisteBoardPath } from '../lib/pisteBoard'
+import { SIDE1, SIDE2 } from '../lib/sideColors'
 
 const BOUT_STATUS_LABEL: Record<MatchStatus, string> = {
   Scheduled: 'Запланирован',
@@ -243,18 +244,21 @@ export default function EncounterPage() {
         display: 'flex', alignItems: 'center', gap: 16, padding: '18px 20px',
         border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa', margin: '4px 0 16px',
       }}>
-        <div style={{ flex: 1, textAlign: 'right', fontSize: '1.25em', fontWeight: 700 }}>{name1}</div>
+        {/* Стороны те же, что в боутах ниже и на табло: команда 1 — синяя,
+            команда 2 — красная. Боут наследует сторону от своей команды, поэтому
+            судья видит один и тот же цвет от серии до карточки боя. */}
+        <div style={{ flex: 1, textAlign: 'right', fontSize: '1.25em', fontWeight: 700, color: SIDE1.text }}>{name1}</div>
         <div style={{ textAlign: 'center', minWidth: 150 }}>
           <div style={{ fontSize: '3em', fontWeight: 900, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
-            {encounter.score1}
+            <span style={{ color: SIDE1.text }}>{encounter.score1}</span>
             <span style={{ color: '#ccc', margin: '0 6px', fontWeight: 300 }}>:</span>
-            {encounter.score2}
+            <span style={{ color: SIDE2.text }}>{encounter.score2}</span>
           </div>
           <div style={{ fontSize: '0.8em', color: '#aaa', marginTop: 4 }}>
             до {encounter.targetTotalScore}
           </div>
         </div>
-        <div style={{ flex: 1, fontSize: '1.25em', fontWeight: 700 }}>{name2}</div>
+        <div style={{ flex: 1, fontSize: '1.25em', fontWeight: 700, color: SIDE2.text }}>{name2}</div>
       </div>
 
       {/* Status + actions */}
@@ -377,9 +381,9 @@ export default function EncounterPage() {
           <thead>
             <tr style={{ background: '#f5f5f5' }}>
               <th style={{ ...TH, width: 40, textAlign: 'center' }}>#</th>
-              <th style={TH}>{name1}</th>
+              <th style={{ ...TH, color: SIDE1.text, borderTop: `3px solid ${SIDE1.line}` }}>{name1}</th>
               <th style={{ ...TH, textAlign: 'center' }}>Счёт</th>
-              <th style={TH}>{name2}</th>
+              <th style={{ ...TH, color: SIDE2.text, borderTop: `3px solid ${SIDE2.line}` }}>{name2}</th>
               <th style={TH}>Статус</th>
               <th style={{ ...TH, width: 30 }} />
             </tr>

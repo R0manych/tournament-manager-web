@@ -25,6 +25,7 @@ import { setHallBoardMatch, useHallBoardMatchId } from '../components/display/us
 import PisteAssign from '../components/PisteAssign'
 import { usePistes } from '../components/usePistes'
 import { pisteBoardPath } from '../lib/pisteBoard'
+import { SIDE1, SIDE2 } from '../lib/sideColors'
 
 // ─── Fight Timer ──────────────────────────────────────────────────────────────
 
@@ -879,10 +880,13 @@ export default function MatchPage() {
         )}
       </div>
 
-      {/* Scoreboard */}
+      {/* Scoreboard. Стороны маркированы цветом так же, как на табло (АР-14):
+          участник 1 — синий слева, участник 2 — красный справа. Судья за
+          пультом и зал смотрят один бой, и расхождение сторон стоит укола,
+          начисленного не тому. */}
       <div style={SCOREBOARD}>
-        <div style={{ flex: 1, textAlign: 'right' }}>
-          <div style={{ fontSize: '1.15em', fontWeight: 700 }}>{name1}</div>
+        <div style={{ ...SIDE_PANEL, borderTopColor: SIDE1.line, background: SIDE1.wash, textAlign: 'right' }}>
+          <div style={{ fontSize: '1.15em', fontWeight: 700, color: SIDE1.text }}>{name1}</div>
           {f1?.club && <div style={{ fontSize: '0.82em', color: '#888' }}>{f1.club}</div>}
           {(match.warnings1 > 0 || isInProgress) && (
             <div style={{ marginTop: 6, fontSize: '0.85em', color: warn1Over ? 'var(--c-danger)' : '#c88' }}>
@@ -903,9 +907,9 @@ export default function MatchPage() {
             letterSpacing: 6,
             fontVariantNumeric: 'tabular-nums',
           }}>
-            {match.score1}
+            <span style={{ color: SIDE1.text }}>{match.score1}</span>
             <span style={{ color: '#ccc', margin: '0 4px', fontWeight: 300 }}>:</span>
-            {match.score2}
+            <span style={{ color: SIDE2.text }}>{match.score2}</span>
           </div>
           <div style={{ marginTop: 6, fontSize: '0.8em', color: doublesOver ? 'var(--c-danger)' : '#aaa' }}>
             ⚔ {match.doubleHitsCount}{doublesLimit != null && ` / ${doublesLimit}`}
@@ -913,8 +917,8 @@ export default function MatchPage() {
           </div>
         </div>
 
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: '1.15em', fontWeight: 700 }}>{name2}</div>
+        <div style={{ ...SIDE_PANEL, borderTopColor: SIDE2.line, background: SIDE2.wash }}>
+          <div style={{ fontSize: '1.15em', fontWeight: 700, color: SIDE2.text }}>{name2}</div>
           {f2?.club && <div style={{ fontSize: '0.82em', color: '#888' }}>{f2.club}</div>}
           {(match.warnings2 > 0 || isInProgress) && (
             <div style={{ marginTop: 6, fontSize: '0.85em', color: warn2Over ? 'var(--c-danger)' : '#c88' }}>
@@ -1047,34 +1051,37 @@ export default function MatchPage() {
           {/* Warnings */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '0 0 16px', alignItems: 'center', justifyContent: 'center' }}>
             <span style={{ color: '#666', fontSize: '0.85em' }}>Предупреждения:</span>
-            <button onClick={() => warnMut.mutate({ f1d: 1 })} disabled={warnMut.isPending}>⚠+ {short1}</button>
-            <button onClick={() => warnMut.mutate({ f1d: -1 })} disabled={warnMut.isPending || match.warnings1 === 0}>⚠− {short1}</button>
-            <button onClick={() => warnMut.mutate({ f2d: 1 })} disabled={warnMut.isPending}>⚠+ {short2}</button>
-            <button onClick={() => warnMut.mutate({ f2d: -1 })} disabled={warnMut.isPending || match.warnings2 === 0}>⚠− {short2}</button>
+            <button onClick={() => warnMut.mutate({ f1d: 1 })} disabled={warnMut.isPending} style={SIDE_BTN1}>⚠+ {short1}</button>
+            <button onClick={() => warnMut.mutate({ f1d: -1 })} disabled={warnMut.isPending || match.warnings1 === 0} style={SIDE_BTN1}>⚠− {short1}</button>
+            <button onClick={() => warnMut.mutate({ f2d: 1 })} disabled={warnMut.isPending} style={SIDE_BTN2}>⚠+ {short2}</button>
+            <button onClick={() => warnMut.mutate({ f2d: -1 })} disabled={warnMut.isPending || match.warnings2 === 0} style={SIDE_BTN2}>⚠− {short2}</button>
           </div>
 
           {/* Видеоповторы. Отдельным рядом от предупреждений: это не санкция, а
               израсходованный ресурс стороны, и путать их кнопками нельзя. */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '0 0 16px', alignItems: 'center', justifyContent: 'center' }}>
             <span style={{ color: '#666', fontSize: '0.85em' }}>Видеоповторы:</span>
-            <button onClick={() => replayMut.mutate({ f1d: 1 })} disabled={replayMut.isPending}>🎥+ {short1}</button>
-            <button onClick={() => replayMut.mutate({ f1d: -1 })} disabled={replayMut.isPending || match.videoReplays1 === 0}>🎥− {short1}</button>
-            <button onClick={() => replayMut.mutate({ f2d: 1 })} disabled={replayMut.isPending}>🎥+ {short2}</button>
-            <button onClick={() => replayMut.mutate({ f2d: -1 })} disabled={replayMut.isPending || match.videoReplays2 === 0}>🎥− {short2}</button>
+            <button onClick={() => replayMut.mutate({ f1d: 1 })} disabled={replayMut.isPending} style={SIDE_BTN1}>🎥+ {short1}</button>
+            <button onClick={() => replayMut.mutate({ f1d: -1 })} disabled={replayMut.isPending || match.videoReplays1 === 0} style={SIDE_BTN1}>🎥− {short1}</button>
+            <button onClick={() => replayMut.mutate({ f2d: 1 })} disabled={replayMut.isPending} style={SIDE_BTN2}>🎥+ {short2}</button>
+            <button onClick={() => replayMut.mutate({ f2d: -1 })} disabled={replayMut.isPending || match.videoReplays2 === 0} style={SIDE_BTN2}>🎥− {short2}</button>
           </div>
 
           {/* Quick score */}
           <div style={{ margin: '0 0 20px', padding: '16px', border: '1px solid #ddd', borderRadius: 8, background: '#fafafa' }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: '0.85em', color: '#555', marginBottom: 6, fontWeight: 600 }}>{short1}</div>
+              {/* Колонка начисления окрашена в цвет своей стороны: под
+                  таймером судья целится в кнопку, а не читает подпись, и
+                  промах здесь — укол не тому бойцу. */}
+              <div style={{ ...SCORE_COLUMN, borderTopColor: SIDE1.line, background: SIDE1.wash }}>
+                <div style={{ fontSize: '0.85em', color: SIDE1.text, marginBottom: 6, fontWeight: 700 }}>{short1}</div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   {[1, 2, 3].map(p => (
                     <button
                       key={p}
                       onClick={() => quickScore(p, 0)}
                       disabled={scoreBusy}
-                      style={BTN_SCORE}
+                      style={{ ...BTN_SCORE, color: SIDE1.text, borderColor: SIDE1.border }}
                     >
                       +{p}
                     </button>
@@ -1115,15 +1122,15 @@ export default function MatchPage() {
                 </div>
               </div>
 
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: '0.85em', color: '#555', marginBottom: 6, fontWeight: 600 }}>{short2}</div>
+              <div style={{ ...SCORE_COLUMN, borderTopColor: SIDE2.line, background: SIDE2.wash }}>
+                <div style={{ fontSize: '0.85em', color: SIDE2.text, marginBottom: 6, fontWeight: 700 }}>{short2}</div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   {[1, 2, 3].map(p => (
                     <button
                       key={p}
                       onClick={() => quickScore(0, p)}
                       disabled={scoreBusy}
-                      style={BTN_SCORE}
+                      style={{ ...BTN_SCORE, color: SIDE2.text, borderColor: SIDE2.border }}
                     >
                       +{p}
                     </button>
@@ -1173,8 +1180,8 @@ export default function MatchPage() {
           <thead>
             <tr style={{ background: '#f5f5f5' }}>
               <th style={TH}>#</th>
-              <th style={TH}>{name1}</th>
-              <th style={TH}>{name2}</th>
+              <th style={{ ...TH, color: SIDE1.text, borderTop: `3px solid ${SIDE1.line}` }}>{name1}</th>
+              <th style={{ ...TH, color: SIDE2.text, borderTop: `3px solid ${SIDE2.line}` }}>{name2}</th>
               <th style={{ ...TH, textAlign: 'center' }}>Обоюдный</th>
               <th style={TH}>Заметка</th>
               {isInProgress && <th style={TH} />}
@@ -1194,8 +1201,8 @@ export default function MatchPage() {
           <tfoot>
             <tr style={{ fontWeight: 600, background: '#f9f9f9' }}>
               <td style={TD}>Итого</td>
-              <td style={TD}>{match.score1}</td>
-              <td style={TD}>{match.score2}</td>
+              <td style={{ ...TD, color: SIDE1.text }}>{match.score1}</td>
+              <td style={{ ...TD, color: SIDE2.text }}>{match.score2}</td>
               <td style={{ ...TD, textAlign: 'center' }}>{match.doubleHitsCount}</td>
               <td style={TD} colSpan={isInProgress ? 2 : 1} />
             </tr>
@@ -1223,12 +1230,46 @@ export default function MatchPage() {
 const SCOREBOARD: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  gap: 16,
+  gap: 12,
   margin: '0 0 8px',
-  padding: '16px 20px',
+  padding: '12px 14px',
   border: '1px solid #e0e0e0',
   borderRadius: 8,
   background: '#fafafa',
+}
+
+// Блок стороны в шапке и колонка её кнопок. Цвет задаётся на месте (`borderTopColor`
+// и `background` из `SIDE1`/`SIDE2`): форма у сторон общая, различает их только
+// цвет — и позиция, которая от него не зависит.
+//
+// Полоса сверху, а не рамка целиком: так блок читается как «шапка стороны» и
+// повторяет табло, где над панелью участника идёт такая же полоса.
+// Кнопки предупреждений и повторов подписаны фамилией, но подпись читают уже
+// после того, как рука пошла к кнопке: цвет здесь работает раньше текста.
+const SIDE_BTN: React.CSSProperties = {
+  borderWidth: 1,
+  borderStyle: 'solid',
+  borderRadius: 4,
+  padding: '3px 10px',
+  cursor: 'pointer',
+  background: '#fff',
+}
+
+const SIDE_BTN1: React.CSSProperties = { ...SIDE_BTN, color: SIDE1.text, borderColor: SIDE1.border }
+const SIDE_BTN2: React.CSSProperties = { ...SIDE_BTN, color: SIDE2.text, borderColor: SIDE2.border }
+
+const SIDE_PANEL: React.CSSProperties = {
+  flex: 1,
+  padding: '10px 14px',
+  borderRadius: 6,
+  borderTop: '3px solid transparent',
+}
+
+const SCORE_COLUMN: React.CSSProperties = {
+  textAlign: 'center',
+  padding: '10px 14px',
+  borderRadius: 6,
+  borderTop: '3px solid transparent',
 }
 
 const TH: React.CSSProperties = {
