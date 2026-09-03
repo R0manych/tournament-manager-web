@@ -11,6 +11,7 @@ import { participantName, participantClub, TOURNAMENT_STATUS_LABELS } from '../a
 import TournamentFormatSection from '../components/TournamentFormatSection'
 import TeamsSection from '../components/TeamsSection'
 import EncountersSection from '../components/EncountersSection'
+import PistesSection from '../components/PistesSection'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
 import { isProduction } from '../lib/env'
 import {
@@ -914,12 +915,14 @@ export default function TournamentDetailPage() {
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0 }}>{tournament.name}</h1>
         {/* Табло для зала (АР-14): вкладка того же браузера на второй монитор.
-            Сама находит текущий бой турнира и слушает пульт. */}
+            Показывает бой, выведенный кнопкой с карточки боя, иначе начатый
+            последним. Для нескольких площадок есть табло ристалища (АР-17) —
+            ссылки на них в секции ристалищ ниже. */}
         <a
           href={`/display/tournament/${tournament.id}`}
           target="_blank"
           rel="noopener"
-          title="Табло, которое следует за организатором этого турнира: показывает бой, открытый на пульте, иначе начатый последним. Для параллельных ристалищ откройте на каждое своё табло с карточки боя."
+          title="Табло зала: показывает бой, выведенный кнопкой «Вывести на табло зала» с карточки боя, иначе начатый последним. Если бои идут на нескольких площадках, заведите ристалища и откройте табло каждого — оно переключается само."
           style={{ color: '#888', fontSize: '0.9em', whiteSpace: 'nowrap' }}
         >
           🖵 Табло для зала
@@ -972,6 +975,10 @@ export default function TournamentDetailPage() {
         generateGroupsLabel={isTeam ? 'Сформировать встречи группового этапа' : 'Сформировать бои группового этапа'}
         onGenerateGroups={(phaseId, groups) => generateMut.mutate({ phaseId, groups })}
       />
+
+      {/* Площадки турнира (АР-17). Рядом с участниками и форматом: это такая же
+          настройка турнира, и заводят её до боёв. */}
+      <PistesSection tournamentId={id!} />
 
       <h2>Встречи {tournament.matchesCount > 0 && `(${tournament.matchesCount})`}</h2>
 

@@ -7,6 +7,8 @@ import { groupEncountersByGroup, resolvePhaseGroups } from './bracket/bracketUti
 import { groupsApi } from '../api/groups'
 import type { Encounter, MatchStatus, TournamentParticipant } from '../api/types'
 import { participantName } from '../api/types'
+import PisteAssign from './PisteAssign'
+import { usePistes } from './usePistes'
 
 // Типизировано по `MatchStatus`: с `Record<string, string>` новый статус
 // отрисовался бы пустым, и компилятор бы промолчал.
@@ -53,6 +55,11 @@ export default function EncountersSection({ tournamentId, participants }: Props)
     queryKey: ['tournament-groups', tournamentId],
     queryFn: () => groupsApi.list(tournamentId),
   })
+
+  // Пустой список ристалищ — турнир на одной площадке (docs/09 §3.3): колонки
+  // назначения тогда нет вовсе.
+  const { data: pistes } = usePistes(tournamentId)
+  const hasPistes = (pistes?.length ?? 0) > 0
 
   const nameOf = (id: string) => {
     const p = participants.find(x => x.participantId === id)
@@ -107,6 +114,7 @@ export default function EncountersSection({ tournamentId, participants }: Props)
                     <th style={{ ...TH, textAlign: 'center' }}>Счёт</th>
                     <th style={TH}>Команда 2</th>
                     <th style={TH}>Статус</th>
+                    {hasPistes && <th style={TH}>Ристалище</th>}
                     <th style={TH} />
                   </tr>
                 </thead>
@@ -123,6 +131,24 @@ export default function EncountersSection({ tournamentId, participants }: Props)
                         {STATUS_LABEL[e.status] ?? e.status}
                         {e.requiresTieBreak && <span style={{ color: '#a86500', marginLeft: 6 }}>· ничья</span>}
                       </td>
+                      {/* Серия назначается целиком — боуты наследуют площадку
+                          (docs/09 §3.2). Раскладывают серии по площадкам пачкой,
+                          поэтому назначение живёт прямо в строке. */}
+                      {hasPistes && (
+                        <td style={TD}>
+                          <PisteAssign
+                            target={{
+                              kind: 'encounter',
+                              id: e.id,
+                              tournamentId,
+                              pisteId: e.pisteId,
+                            }}
+                            disabled={e.status !== 'Scheduled' && e.status !== 'InProgress'}
+                            disabledTitle="Встреча завершена: назначать площадку задним числом нечему"
+                            compact
+                          />
+                        </td>
+                      )}
                       <td style={TD}><Link to={`/encounters/${e.id}`}>→</Link></td>
                     </tr>
                   ))}

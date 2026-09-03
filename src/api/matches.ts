@@ -1,5 +1,11 @@
 import { api } from './client'
-import type { Match, MatchStatus, CreateMatchRequest, AddExchangeRequest } from './types'
+import type {
+  AddExchangeRequest,
+  AssignPisteRequest,
+  CreateMatchRequest,
+  Match,
+  MatchStatus,
+} from './types'
 
 export interface GenerateRoundRobinResponse {
   created: number
@@ -8,8 +14,13 @@ export interface GenerateRoundRobinResponse {
 }
 
 export const matchesApi = {
-  listByTournament: (tournamentId: string) =>
-    api.get<Match[]>(`/tournaments/${tournamentId}/matches`),
+  // `pisteId` фильтрует по эффективному ристалищу (docs/09 §5.4): боут приходит
+  // в выборку своей серии. Нужен табло ристалища и очереди по площадке — без
+  // него оба тянули бы все встречи турнира и фильтровали на клиенте.
+  listByTournament: (tournamentId: string, pisteId?: string) =>
+    api.get<Match[]>(
+      `/tournaments/${tournamentId}/matches${pisteId ? `?pisteId=${pisteId}` : ''}`
+    ),
   get: (id: string) => api.get<Match>(`/matches/${id}`),
   create: (tournamentId: string, data: CreateMatchRequest) =>
     api.post<Match>(`/tournaments/${tournamentId}/matches`, data),
@@ -20,6 +31,24 @@ export const matchesApi = {
       `/tournaments/${tournamentId}/matches/generate-round-robin`,
       { phaseId, groups }
     ),
+
+  // Ристалище правится и у идущего боя: перевести бой на другую площадку —
+  // законная операция, ограничение «только при Scheduled» на `pisteId` не
+  // распространяется (docs/09 §5.2). Границы задаёт инвариант 55.
+  //
+  // Настройки приходится слать целиком: `PATCH /matches/{id}` заменяет весь их
+  // блок, а «трогает ли запрос настройки» сервер определяет сравнением с
+  // текущими значениями (спека §8.1, п. 5). Послать один `pisteId` значило бы
+  // обнулить `scheduledAt` и оверрайды боя — а у идущего боя ещё и получить 409.
+  // Отвечает 204, поэтому вызывающий обновляет кэш инвалидацией.
+  assignPiste: (match: Match, pisteId: string | null) =>
+    api.patch<void>(`/matches/${match.id}`, {
+      scheduledAt: match.scheduledAt ?? null,
+      roundDurationSeconds: match.roundDurationSeconds ?? null,
+      maxDoubles: match.maxDoubles ?? null,
+      maxWarnings: match.maxWarnings ?? null,
+      pisteId,
+    } satisfies AssignPisteRequest),
 
   setStatus: (id: string, status: MatchStatus) =>
     api.patch<Match>(`/matches/${id}/status`, { status }),

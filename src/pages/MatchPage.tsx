@@ -21,6 +21,10 @@ import {
   parseDisplayMessage,
   postDisplay,
 } from '../lib/displayChannel'
+import { setHallBoardMatch, useHallBoardMatchId } from '../components/display/useHallBoard'
+import PisteAssign from '../components/PisteAssign'
+import { usePistes } from '../components/usePistes'
+import { pisteBoardPath } from '../lib/pisteBoard'
 
 // ─── Fight Timer ──────────────────────────────────────────────────────────────
 
@@ -237,6 +241,10 @@ export default function MatchPage() {
     refetchInterval: q => (q.state.data?.status === 'InProgress' ? 5000 : false),
   })
 
+  // Ристалища турнира: подпись площадки и ссылка на её табло. Пустой список —
+  // штатный турнир на одной площадке (docs/09 §3.3), тогда всё это не рисуется.
+  const { data: pistes } = usePistes(match?.tournamentId)
+
   // Якорь отсчёта — `currentRoundStartedAt` (ТЗ §7.4). Перехода раунда в UI нет
   // (раундов в дисциплине нет, серия — это отдельные встречи, АР-15), поэтому
   // якорь совпадает со `startedAt`; он же и фолбэк, если метки раунда нет.
@@ -353,10 +361,15 @@ export default function MatchPage() {
   }, [match?.id, anchorMs])
 
   // ─── Вещание на табло (АР-14) ───────────────────────────────────────────────
-  // Эта вкладка — пульт: она сообщает табло, какой бой смотрит организатор, и
-  // нормализованное состояние таймера. Тик не передаётся: табло тикает само от
+  // Эта вкладка — пульт: она сообщает табло нормализованное состояние таймера и
+  // счёт сразу после схода. Тик не передаётся: табло тикает само от
   // `deadlineMs`. Пауза живёт только на клиенте (АР-1), поэтому без этого канала
   // табло разошлось бы с пультом на всех паузах.
+  //
+  // Чего здесь больше НЕТ — `show` при открытии страницы. Открытая карточка боя
+  // означала «показывай это залу», и зал переключался на бой, в который
+  // оператор просто заглянул уточнить счёт (B-12). Теперь `show` уходит только
+  // по кнопке «Вывести на табло зала» (docs/09 §7).
   const channelRef = useRef<BroadcastChannel | null>(null)
   const publishRef = useRef<() => void>(() => {})
 
@@ -387,7 +400,6 @@ export default function MatchPage() {
     publishRef.current = () => {
       const channel = channelRef.current
       if (!channel) return
-      postDisplay(channel, { type: 'show', matchId, tournamentId })
       postDisplay(channel, {
         type: 'timer',
         matchId,
@@ -422,6 +434,22 @@ export default function MatchPage() {
     score?.score2,
     score?.doubleHitsCount,
   ])
+
+  // ─── «Вывести на табло зала» (B-12, docs/09 §7) ─────────────────────────────
+  // Явное действие вместо автопубликации: зал переключается по решению
+  // оператора, а не по тому, какую вкладку он открыл. Решение хранится (общее
+  // для вкладок одного браузера) — иначе табло, перезагруженное после нажатия,
+  // о нём бы не узнало: отвечать на `hello` теперь некому.
+  //
+  // Это про турниры без ристалищ (docs/09 §3.3). Там, где площадки заведены,
+  // табло ристалища знает свой бой из данных, и кнопка ему не нужна.
+  const hallBoardMatchId = useHallBoardMatchId(match?.tournamentId)
+  const onHallBoard = hallBoardMatchId != null && hallBoardMatchId === match?.id
+
+  function toggleHallBoard() {
+    if (!match) return
+    setHallBoardMatch(match.tournamentId, onHallBoard ? null : match.id, channelRef.current)
+  }
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['matches', id] })
@@ -621,6 +649,10 @@ export default function MatchPage() {
   if (isLoading) return <p>Загрузка...</p>
   if (!match) return <p>Встреча не найдена</p>
 
+  // Площадка боя — эффективная: у боута собственный `pisteId` пуст всегда
+  // (инвариант 54), площадку задаёт его серия.
+  const matchPiste = pistes?.find(p => p.id === match.effectivePisteId)
+
   const isBye = match.fighter2Id == null
   const name1 = f1 ? `${f1.firstName} ${f1.lastName}` : '…'
   const name2 = isBye ? 'БАЙ' : (f2 ? `${f2.firstName} ${f2.lastName}` : '…')
@@ -685,15 +717,59 @@ export default function MatchPage() {
         <Link to={`/tournaments/${match.tournamentId}/matches`} style={{ color: '#888', whiteSpace: 'nowrap' }}>
           ← Встречи
         </Link>
+        {/* Три табло с честными подписями (B-12, п. 3): раньше отсюда была
+            достижима только закреплённая ссылка, и оператор переоткрывал её на
+            каждый бой, считая это единственным табло. */}
+        {matchPiste && (
+          <a
+            href={pisteBoardPath(matchPiste.id)}
+            target="_blank"
+            rel="noopener"
+            title="Табло площадки: само показывает бой, идущий на этом ристалище, и следующую пару этой же площадки. Переоткрывать на каждый бой не нужно."
+            style={{ color: '#1976d2', whiteSpace: 'nowrap' }}
+          >
+            🖵 Табло ристалища «{matchPiste.name}»
+          </a>
+        )}
         <a
           href={`/display/match/${match.id}`}
           target="_blank"
           rel="noopener"
-          title="Табло, закреплённое за этим боем: не переключится, когда рядом идут другие бои. Перетащите вкладку на второй монитор ристалища."
+          title="Табло, закреплённое за этим боем: не переключится ни на какой другой. Для финала на большом экране."
           style={{ color: '#888', whiteSpace: 'nowrap' }}
         >
-          🖵 Табло этого боя
+          🖵 Табло этого боя (не переключится)
         </a>
+        <a
+          href={`/display/tournament/${match.tournamentId}`}
+          target="_blank"
+          rel="noopener"
+          title="Табло зала: показывает бой, выведенный кнопкой «Вывести на табло зала», иначе начатый последним."
+          style={{ color: '#888', whiteSpace: 'nowrap' }}
+        >
+          🖵 Табло зала (следует за выбором)
+        </a>
+        <button
+          onClick={toggleHallBoard}
+          title={
+            onHallBoard
+              ? 'Сейчас на табло зала этот бой. Снять — зал вернётся к бою, начатому последним.'
+              : 'Показать этот бой на табло зала. Пока не нажать, зал не переключится: открытая карточка боя сама по себе ничего не выводит.'
+          }
+          style={{
+            whiteSpace: 'nowrap',
+            fontSize: '0.9em',
+            cursor: 'pointer',
+            borderRadius: 4,
+            padding: '2px 10px',
+            border: onHallBoard ? '1px solid #2e7d32' : '1px solid #ccc',
+            background: onHallBoard ? '#e8f9ec' : '#fff',
+            color: onHallBoard ? '#2e7d32' : '#555',
+            fontWeight: onHallBoard ? 600 : 400,
+          }}
+        >
+          {onHallBoard ? '● Сейчас на табло зала' : 'Вывести на табло зала'}
+        </button>
         <span style={{ flex: 1 }} />
         {prevMatch && (
           <Link
@@ -783,6 +859,23 @@ export default function MatchPage() {
           <span style={{ fontSize: '0.85em', color: '#888' }}>
             {new Date(match.scheduledAt).toLocaleString('ru')}
           </span>
+        )}
+        {/* Ристалище — рядом со статусом (docs/09 §6.2). У боута оно своё
+            только через серию, поэтому здесь оно показано, но не правится:
+            назначить площадку отдельному боуту нельзя (инвариант 54). */}
+        {isBout ? (
+          matchPiste && (
+            <span style={{ fontSize: '0.85em', color: '#888' }} title="Площадка серии: боут идёт там же, где вся серия">
+              🏟 {matchPiste.name} <span style={{ color: '#bbb' }}>(от серии)</span>
+            </span>
+          )
+        ) : (
+          <PisteAssign
+            target={{ kind: 'match', match }}
+            disabled={isCompleted || isWalkover || isDoubleLoss || match.status === 'Cancelled'}
+            disabledTitle="Бой завершён: назначать площадку задним числом нечему"
+            compact
+          />
         )}
       </div>
 

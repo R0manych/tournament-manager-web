@@ -15,9 +15,27 @@ import type { DisplayLink } from './useDisplayLink'
 import { BLUE, RED, SCREEN, MUTED } from './boardStyle'
 
 /** Сколько держать итог завершённого боя, прежде чем уйти в экран ожидания. */
-const RESULT_HOLD_MS = 20_000
+export const RESULT_HOLD_MS = 20_000
 
-export default function MatchBoard({ matchId, link }: { matchId: string; link: DisplayLink }) {
+/**
+ * Площадка, за которой закреплено табло (docs/09 §6.3). Задана — очередь
+ * («следующая пара») считается внутри ристалища, а не по всему турниру: при
+ * двух площадках зал иначе видит пару, которая пойдёт не здесь (дефект 3, §1.1).
+ */
+export interface BoardPiste {
+  id: string
+  name: string
+}
+
+export default function MatchBoard({
+  matchId,
+  link,
+  piste,
+}: {
+  matchId: string
+  link: DisplayLink
+  piste?: BoardPiste
+}) {
   const { data: match, isLoading, isError, dataUpdatedAt } = useQuery({
     queryKey: ['matches', matchId],
     queryFn: () => matchesApi.get(matchId),
@@ -52,9 +70,10 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
   })
 
   // Только ради «следующей пары»: список боёв турнира / составы команд.
+  // На табло ристалища выборка сужена площадкой — очередь у каждой своя.
   const { data: tournamentMatches } = useQuery({
-    queryKey: ['tournament-matches', match?.tournamentId],
-    queryFn: () => matchesApi.listByTournament(match!.tournamentId),
+    queryKey: ['tournament-matches', match?.tournamentId, piste?.id ?? null],
+    queryFn: () => matchesApi.listByTournament(match!.tournamentId, piste?.id),
     enabled: !!match?.tournamentId && !match?.encounterId,
     refetchInterval: 10_000,
   })
@@ -112,9 +131,9 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
   const isDoubleLoss = match.status === 'DoubleLoss'
   const isFinished = match.status === 'Completed' || match.status === 'WalkoverWin' || isDoubleLoss
   if (isFinished && endedMs != null && now - endedMs > RESULT_HOLD_MS) {
-    return <WaitingBoard tournamentId={match.tournamentId} />
+    return <WaitingBoard tournamentId={match.tournamentId} piste={piste} />
   }
-  if (match.status === 'Cancelled') return <WaitingBoard tournamentId={match.tournamentId} />
+  if (match.status === 'Cancelled') return <WaitingBoard tournamentId={match.tournamentId} piste={piste} />
 
   // Счёт от пульта приходит в момент схода, ответ поллинга — до двух секунд
   // спустя. Берём тот, что новее: запоздавший ответ API не должен «откатывать»
@@ -174,7 +193,12 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
   return (
     <Screen>
       <header style={HEADER}>
-        <span style={{ color: MUTED }}>{tournament?.name ?? ''}</span>
+        <span style={{ color: MUTED }}>
+          {tournament?.name ?? ''}
+          {/* Подпись площадки: в зале с двумя ристалищами по одному счёту не
+              понять, на какое из них смотришь. */}
+          {piste && <span style={{ color: '#f5f7fa' }}>{tournament?.name ? ' · ' : ''}{piste.name}</span>}
+        </span>
         <BoutContext match={match} encounter={encounter} tournament={tournament} />
         <span style={{ display: 'flex', gap: '1.4vh', alignItems: 'center' }}>
           {match.status === 'Scheduled' && <span style={{ color: MUTED }}>Ожидание старта</span>}
@@ -234,7 +258,13 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
 
 // ─── Экран ожидания ───────────────────────────────────────────────────────────
 
-export function WaitingBoard({ tournamentId }: { tournamentId?: string }) {
+export function WaitingBoard({
+  tournamentId,
+  piste,
+}: {
+  tournamentId?: string
+  piste?: BoardPiste
+}) {
   const { data: tournament } = useQuery({
     queryKey: ['tournaments', tournamentId],
     queryFn: () => tournamentsApi.get(tournamentId!),
@@ -242,8 +272,8 @@ export function WaitingBoard({ tournamentId }: { tournamentId?: string }) {
   })
 
   const { data: matches } = useQuery({
-    queryKey: ['tournament-matches', tournamentId],
-    queryFn: () => matchesApi.listByTournament(tournamentId!),
+    queryKey: ['tournament-matches', tournamentId, piste?.id ?? null],
+    queryFn: () => matchesApi.listByTournament(tournamentId!, piste?.id),
     enabled: !!tournamentId,
     refetchInterval: 5000,
   })
@@ -265,6 +295,11 @@ export function WaitingBoard({ tournamentId }: { tournamentId?: string }) {
     <Screen>
       <div style={{ margin: 'auto', textAlign: 'center', padding: '0 4vw' }}>
         <div style={{ fontSize: '5vh', fontWeight: 700 }}>{tournament?.name ?? ''}</div>
+        {piste && (
+          <div style={{ fontSize: '4vh', fontWeight: 700, color: MUTED, marginTop: '1vh' }}>
+            {piste.name}
+          </div>
+        )}
         <div style={{ fontSize: '3vh', color: MUTED, marginTop: '3vh' }}>
           {label ? 'Следующая пара' : 'Активного боя нет'}
         </div>
