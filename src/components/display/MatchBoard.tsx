@@ -230,11 +230,28 @@ export default function MatchBoard({
           {expired && <div style={{ ...TIMER_NOTE, color: RED.text }}>время вышло</div>}
           {/* Обоюдные с лимитом. Достигнутый лимит подсвечивается — это то же
               предупреждение, что и на карточке боя у судьи, и залу оно тоже
-              адресовано. Лимит сигналит, не принуждает (АР-12/13). */}
+              адресовано. Лимит сигналит, не принуждает (АР-12/13).
+
+              Читается из зала наравне со счётом: это счётчик, за которым следят
+              и секунданты, и бойцы, а приглушённо-серым с нескольких метров он
+              был неразличим. Ярче таймера при этом не становится — иначе спорил
+              бы с ним за внимание. */}
           {live.doubleHitsCount > 0 && (
-            <div style={{ ...DOUBLES, color: doublesOver ? RED.text : MUTED }}>
+            <div
+              style={{
+                ...DOUBLES,
+                color: doublesOver ? RED.text : '#f5f7fa',
+                background: doublesOver ? 'rgba(220, 38, 38, 0.18)' : 'rgba(255, 255, 255, 0.07)',
+                borderColor: doublesOver ? RED.line : '#394054',
+              }}
+            >
               ⚔ {live.doubleHitsCount}
-              {match.effectiveMaxDoubles != null && ` / ${match.effectiveMaxDoubles}`}
+              {match.effectiveMaxDoubles != null && (
+                <span style={{ color: doublesOver ? RED.text : MUTED }}>
+                  {' / '}
+                  {match.effectiveMaxDoubles}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -589,11 +606,20 @@ const TIMER_NOTE: React.CSSProperties = {
   letterSpacing: '0.3vh',
 }
 
+// Плашка, а не строка текста: обведённый блок ловится взглядом с расстояния,
+// с которого мелкая надпись сливается с фоном. Кегль между подписью таймера
+// (3vh) и счётом (30vh) — счётчик важный, но не главный на экране.
 const DOUBLES: React.CSSProperties = {
-  fontSize: '3.4vh',
-  color: MUTED,
+  fontSize: '5.4vh',
+  fontWeight: 800,
   marginTop: '2vh',
+  padding: '0.6vh 2vh',
+  borderRadius: '1.4vh',
+  borderWidth: '0.3vh',
+  borderStyle: 'solid',
   fontVariantNumeric: 'tabular-nums',
+  lineHeight: 1.15,
+  whiteSpace: 'nowrap',
 }
 
 const FOOTER: React.CSSProperties = {
