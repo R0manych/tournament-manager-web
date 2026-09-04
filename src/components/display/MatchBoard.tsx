@@ -7,7 +7,8 @@ import { teamsApi } from '../../api/teams'
 import { tournamentsApi } from '../../api/tournaments'
 import type { Encounter, Match, Team, Tournament, TournamentFormat } from '../../api/types'
 import { participantName } from '../../api/types'
-import { buildBoutOrder, compareBoutOrder } from '../bracket/bracketUtils'
+import { orderMatchesForPlay } from '../bracket/bracketUtils'
+import { usePistes } from '../usePistes'
 import { formatClock, formatCountdown, remainingSeconds, remainingUntil } from '../../lib/timer'
 import { readTimerOffset, timerOffsetKey } from '../../lib/timerOffset'
 import type { TimerOffset } from '../../lib/timerOffset'
@@ -15,9 +16,27 @@ import type { DisplayLink } from './useDisplayLink'
 import { BLUE, RED, SCREEN, MUTED } from './boardStyle'
 
 /** Сколько держать итог завершённого боя, прежде чем уйти в экран ожидания. */
-const RESULT_HOLD_MS = 20_000
+export const RESULT_HOLD_MS = 20_000
 
-export default function MatchBoard({ matchId, link }: { matchId: string; link: DisplayLink }) {
+/**
+ * Площадка, за которой закреплено табло (docs/09 §6.3). Задана — очередь
+ * («следующая пара») считается внутри ристалища, а не по всему турниру: при
+ * двух площадках зал иначе видит пару, которая пойдёт не здесь (дефект 3, §1.1).
+ */
+export interface BoardPiste {
+  id: string
+  name: string
+}
+
+export default function MatchBoard({
+  matchId,
+  link,
+  piste,
+}: {
+  matchId: string
+  link: DisplayLink
+  piste?: BoardPiste
+}) {
   const { data: match, isLoading, isError, dataUpdatedAt } = useQuery({
     queryKey: ['matches', matchId],
     queryFn: () => matchesApi.get(matchId),
@@ -51,10 +70,23 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
     refetchInterval: q => (q.state.data?.status === 'InProgress' ? 2000 : false),
   })
 
+  // Заведены ли площадки вообще. От этого зависит не оформление, а само право
+  // обещать залу следующую пару: с ристалищами очередь принадлежит площадке, и
+  // общетурнирная «следующая пара» становится неверной (docs/09 §1.1, дефект 3).
+  const { data: pistes } = usePistes(match?.tournamentId)
+  const hasPistes = (pistes?.length ?? 0) > 0
+
+  // Площадка, чью очередь показываем. У закреплённого табло (`/display/match/:id`)
+  // и табло турнира пропа `piste` нет, но бой всё равно может стоять на
+  // ристалище — тогда берём его: очередь определяется данными боя, а не тем,
+  // по какой ссылке открыли экран.
+  const scopePisteId = piste?.id ?? match?.effectivePisteId
+
   // Только ради «следующей пары»: список боёв турнира / составы команд.
+  // Выборка сужена площадкой, если она известна — очередь у каждой своя.
   const { data: tournamentMatches } = useQuery({
-    queryKey: ['tournament-matches', match?.tournamentId],
-    queryFn: () => matchesApi.listByTournament(match!.tournamentId),
+    queryKey: ['tournament-matches', match?.tournamentId, scopePisteId ?? null],
+    queryFn: () => matchesApi.listByTournament(match!.tournamentId, scopePisteId),
     enabled: !!match?.tournamentId && !match?.encounterId,
     refetchInterval: 10_000,
   })
@@ -112,9 +144,9 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
   const isDoubleLoss = match.status === 'DoubleLoss'
   const isFinished = match.status === 'Completed' || match.status === 'WalkoverWin' || isDoubleLoss
   if (isFinished && endedMs != null && now - endedMs > RESULT_HOLD_MS) {
-    return <WaitingBoard tournamentId={match.tournamentId} />
+    return <WaitingBoard tournamentId={match.tournamentId} piste={piste} />
   }
-  if (match.status === 'Cancelled') return <WaitingBoard tournamentId={match.tournamentId} />
+  if (match.status === 'Cancelled') return <WaitingBoard tournamentId={match.tournamentId} piste={piste} />
 
   // Счёт от пульта приходит в момент схода, ответ поллинга — до двух секунд
   // спустя. Берём тот, что новее: запоздавший ответ API не должен «откатывать»
@@ -169,12 +201,20 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
   }
   const expired = seconds != null && totalSeconds != null && seconds === 0
 
-  const nextPair = resolveNextPair({ match, encounter, tournament, tournamentMatches, teams, format })
+  const nextPair = resolveNextPair({
+    match, encounter, tournament, tournamentMatches, teams, format,
+    hasPistes, scopePisteId,
+  })
 
   return (
     <Screen>
       <header style={HEADER}>
-        <span style={{ color: MUTED }}>{tournament?.name ?? ''}</span>
+        <span style={{ color: MUTED }}>
+          {tournament?.name ?? ''}
+          {/* Подпись площадки: в зале с двумя ристалищами по одному счёту не
+              понять, на какое из них смотришь. */}
+          {piste && <span style={{ color: '#f5f7fa' }}>{tournament?.name ? ' · ' : ''}{piste.name}</span>}
+        </span>
         <BoutContext match={match} encounter={encounter} tournament={tournament} />
         <span style={{ display: 'flex', gap: '1.4vh', alignItems: 'center' }}>
           {match.status === 'Scheduled' && <span style={{ color: MUTED }}>Ожидание старта</span>}
@@ -206,11 +246,28 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
           {expired && <div style={{ ...TIMER_NOTE, color: RED.text }}>время вышло</div>}
           {/* Обоюдные с лимитом. Достигнутый лимит подсвечивается — это то же
               предупреждение, что и на карточке боя у судьи, и залу оно тоже
-              адресовано. Лимит сигналит, не принуждает (АР-12/13). */}
+              адресовано. Лимит сигналит, не принуждает (АР-12/13).
+
+              Читается из зала наравне со счётом: это счётчик, за которым следят
+              и секунданты, и бойцы, а приглушённо-серым с нескольких метров он
+              был неразличим. Ярче таймера при этом не становится — иначе спорил
+              бы с ним за внимание. */}
           {live.doubleHitsCount > 0 && (
-            <div style={{ ...DOUBLES, color: doublesOver ? RED.text : MUTED }}>
+            <div
+              style={{
+                ...DOUBLES,
+                color: doublesOver ? RED.text : '#f5f7fa',
+                background: doublesOver ? 'rgba(220, 38, 38, 0.18)' : 'rgba(255, 255, 255, 0.07)',
+                borderColor: doublesOver ? RED.line : '#394054',
+              }}
+            >
               ⚔ {live.doubleHitsCount}
-              {match.effectiveMaxDoubles != null && ` / ${match.effectiveMaxDoubles}`}
+              {match.effectiveMaxDoubles != null && (
+                <span style={{ color: doublesOver ? RED.text : MUTED }}>
+                  {' / '}
+                  {match.effectiveMaxDoubles}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -234,7 +291,13 @@ export default function MatchBoard({ matchId, link }: { matchId: string; link: D
 
 // ─── Экран ожидания ───────────────────────────────────────────────────────────
 
-export function WaitingBoard({ tournamentId }: { tournamentId?: string }) {
+export function WaitingBoard({
+  tournamentId,
+  piste,
+}: {
+  tournamentId?: string
+  piste?: BoardPiste
+}) {
   const { data: tournament } = useQuery({
     queryKey: ['tournaments', tournamentId],
     queryFn: () => tournamentsApi.get(tournamentId!),
@@ -242,8 +305,8 @@ export function WaitingBoard({ tournamentId }: { tournamentId?: string }) {
   })
 
   const { data: matches } = useQuery({
-    queryKey: ['tournament-matches', tournamentId],
-    queryFn: () => matchesApi.listByTournament(tournamentId!),
+    queryKey: ['tournament-matches', tournamentId, piste?.id ?? null],
+    queryFn: () => matchesApi.listByTournament(tournamentId!, piste?.id),
     enabled: !!tournamentId,
     refetchInterval: 5000,
   })
@@ -258,13 +321,28 @@ export function WaitingBoard({ tournamentId }: { tournamentId?: string }) {
       (error as { status?: number })?.status !== 404 && failureCount < 2,
   })
 
-  const next = byStartOrder(matches ?? [], format).find(m => m.status === 'Scheduled')
+  const { data: pistes } = usePistes(tournamentId)
+  const hasPistes = (pistes?.length ?? 0) > 0
+
+  // Экран ожидания подчиняется тому же правилу, что и карточка боя: с
+  // заведёнными ристалищами очередь принадлежит площадке, и табло без площадки
+  // (`/display/tournament/:id`) следующую пару не обещает — она была бы взята
+  // по всему турниру и почти наверняка пошла бы не здесь.
+  const scoped = !hasPistes || piste != null
+  const next = scoped
+    ? orderMatchesForPlay(matches ?? [], format).find(m => m.status === 'Scheduled')
+    : undefined
   const label = next && tournament ? pairLabel(next, tournament) : null
 
   return (
     <Screen>
       <div style={{ margin: 'auto', textAlign: 'center', padding: '0 4vw' }}>
         <div style={{ fontSize: '5vh', fontWeight: 700 }}>{tournament?.name ?? ''}</div>
+        {piste && (
+          <div style={{ fontSize: '4vh', fontWeight: 700, color: MUTED, marginTop: '1vh' }}>
+            {piste.name}
+          </div>
+        )}
         <div style={{ fontSize: '3vh', color: MUTED, marginTop: '3vh' }}>
           {label ? 'Следующая пара' : 'Активного боя нет'}
         </div>
@@ -454,21 +532,6 @@ function BoutContext({
 
 // ─── Следующая пара ───────────────────────────────────────────────────────────
 
-// Порядок тот же, что в списке встреч у организатора: очередь боёв внутри
-// ячейки (`buildBoutOrder`), ячейки — по формату. Сортировка по времени
-// осталась запасной ступенью для встреч без размещения: у сгенерированных
-// одним запросом `createdAt` совпадает до миллисекунды, поэтому сама по себе
-// она порядка не задаёт.
-function byStartOrder(
-  matches: Match[],
-  format: TournamentFormat | undefined,
-): Match[] {
-  const order = buildBoutOrder(matches)
-  return [...matches]
-    .sort((a, b) => (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt))
-    .sort((a, b) => compareBoutOrder(a, b, format, order))
-}
-
 function pairLabel(match: Match, tournament: Tournament): string {
   const name = (id?: string) => {
     const p = tournament.participants.find(x => x.participantId === id)
@@ -486,8 +549,13 @@ function resolveNextPair(args: {
   tournamentMatches?: Match[]
   teams?: Team[]
   format?: TournamentFormat
+  /** В турнире заведена хотя бы одна площадка. */
+  hasPistes: boolean
+  /** Площадка, чью очередь показываем; `undefined` — бой ни на какой не стоит. */
+  scopePisteId?: string
 }): string | null {
   const { match, encounter, tournament, tournamentMatches, teams, format } = args
+  const { hasPistes, scopePisteId } = args
 
   // Боут: следующий бой той же серии, имена — из составов команд.
   if (match.encounterId) {
@@ -505,7 +573,13 @@ function resolveNextPair(args: {
   }
 
   if (!tournament || !tournamentMatches) return null
-  const ordered = byStartOrder(tournamentMatches, format)
+
+  // Ристалища заведены, а бой ни на одно не назначен — очереди у него нет.
+  // Общетурнирная «следующая пара» здесь была бы обещанием, за которое никто
+  // не отвечает: следующей на этой площадке она не станет.
+  if (hasPistes && !scopePisteId) return null
+
+  const ordered = orderMatchesForPlay(tournamentMatches, format)
   const idx = ordered.findIndex(m => m.id === match.id)
   const next = ordered.slice(idx + 1).find(m => m.status === 'Scheduled')
   return next ? pairLabel(next, tournament) : null
@@ -554,11 +628,20 @@ const TIMER_NOTE: React.CSSProperties = {
   letterSpacing: '0.3vh',
 }
 
+// Плашка, а не строка текста: обведённый блок ловится взглядом с расстояния,
+// с которого мелкая надпись сливается с фоном. Кегль между подписью таймера
+// (3vh) и счётом (30vh) — счётчик важный, но не главный на экране.
 const DOUBLES: React.CSSProperties = {
-  fontSize: '3.4vh',
-  color: MUTED,
+  fontSize: '5.4vh',
+  fontWeight: 800,
   marginTop: '2vh',
+  padding: '0.6vh 2vh',
+  borderRadius: '1.4vh',
+  borderWidth: '0.3vh',
+  borderStyle: 'solid',
   fontVariantNumeric: 'tabular-nums',
+  lineHeight: 1.15,
+  whiteSpace: 'nowrap',
 }
 
 const FOOTER: React.CSSProperties = {

@@ -1,5 +1,11 @@
 import { api } from './client'
-import type { Encounter, MatchStatus, CreateEncounterRequest, CreateTieBreakRequest } from './types'
+import type {
+  AssignPisteRequest,
+  CreateEncounterRequest,
+  CreateTieBreakRequest,
+  Encounter,
+  MatchStatus,
+} from './types'
 
 export const encountersApi = {
   listByTournament: (tournamentId: string) =>
@@ -11,6 +17,11 @@ export const encountersApi = {
 
   // Idempotent — creates 9 bouts by the FIE 3v3 schedule.
   generateBouts: (id: string) => api.post<Encounter>(`/encounters/${id}/generate-bouts`),
+
+  // Серия назначается на ристалище целиком — боуты наследуют (docs/09 §3.2),
+  // назначить площадку отдельному боуту нельзя (инвариант 54). Отвечает 204.
+  assignPiste: (id: string, pisteId: string | null) =>
+    api.patch<void>(`/encounters/${id}`, { pisteId } satisfies AssignPisteRequest),
 
   setStatus: (id: string, status: MatchStatus) =>
     api.patch<Encounter>(`/encounters/${id}/status`, { status }),

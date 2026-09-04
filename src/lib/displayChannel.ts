@@ -26,11 +26,18 @@ export type DisplayPayload =
   /** Табло открылось или перезагрузилось — просит текущее состояние. */
   | { type: 'hello' }
   /**
-   * «Организатор смотрит этот бой». Канал общий на весь браузер, поэтому у
+   * «Показывай залу этот бой». Канал общий на весь браузер, поэтому у
    * сообщения есть адрес: `tournamentId` отсекает чужой турнир, а табло,
    * открытое на конкретный бой, `show` не слушает вовсе (см. B-9).
+   *
+   * Уходит только по явному действию оператора — кнопке «Вывести на табло
+   * зала». Автопубликации при открытии карточки боя больше нет: она означала
+   * «зал показывает то, во что заглянул оператор» (B-12, docs/09 §7).
+   * `matchId: null` — снятие с табло, зал возвращается к бою, начатому
+   * последним. Решение переживает F5 обеих вкладок через `lib/displayShow.ts`;
+   * это сообщение — только мгновенная доставка.
    */
-  | { type: 'show'; matchId: string; tournamentId: string }
+  | { type: 'show'; matchId: string | null; tournamentId: string }
   | { type: 'timer'; matchId: string; timer: BoardTimer }
   /**
    * Счёт сразу после схода. Сервер возвращает пересчитанную встречу в ответе на
@@ -60,7 +67,11 @@ export function parseDisplayMessage(data: unknown): DisplayPayload | null {
   const msg = data as Partial<DisplayMessage> | null
   if (!msg || msg.v !== DISPLAY_PROTOCOL_VERSION) return null
   if (msg.type === 'hello') return { type: 'hello' }
-  if (msg.type === 'show' && typeof msg.matchId === 'string' && typeof msg.tournamentId === 'string') {
+  if (
+    msg.type === 'show' &&
+    (typeof msg.matchId === 'string' || msg.matchId === null) &&
+    typeof msg.tournamentId === 'string'
+  ) {
     return { type: 'show', matchId: msg.matchId, tournamentId: msg.tournamentId }
   }
   if (msg.type === 'timer' && typeof msg.matchId === 'string' && msg.timer) {

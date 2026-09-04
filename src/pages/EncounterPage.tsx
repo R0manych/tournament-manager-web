@@ -8,7 +8,12 @@ import { groupEncountersByGroup, resolvePhaseGroups } from '../components/bracke
 import { groupsApi } from '../api/groups'
 import type { Match, MatchStatus, Team } from '../api/types'
 import { participantName } from '../api/types'
-import { openDisplayChannel, parseDisplayMessage, postDisplay } from '../lib/displayChannel'
+import { openDisplayChannel } from '../lib/displayChannel'
+import { setHallBoardMatch, useHallBoardMatchId } from '../components/display/useHallBoard'
+import PisteAssign from '../components/PisteAssign'
+import { usePistes } from '../components/usePistes'
+import { pisteBoardPath } from '../lib/pisteBoard'
+import { SIDE1, SIDE2 } from '../lib/sideColors'
 
 const BOUT_STATUS_LABEL: Record<MatchStatus, string> = {
   Scheduled: 'Запланирован',
@@ -74,36 +79,40 @@ export default function EncounterPage() {
     enabled: !!encounter?.tournamentId,
   })
 
-  // Табло (АР-14): пока организатор на карточке серии, «прикреплённый» бой —
-  // текущий боут. Состояние таймера отсюда не вещается: им владеет карточка боя,
-  // а табло без него берёт сдвиг из localStorage (B-3).
-  const shownBoutId = (() => {
+  // Ристалища турнира: подпись площадки серии и ссылка на её табло. Пустой
+  // список — турнир на одной площадке (docs/09 §3.3), тогда ничего не рисуется.
+  const { data: pistes } = usePistes(encounter?.tournamentId)
+
+  // Табло зала (АР-14): текущий боут серии — тот, что идёт, иначе первый
+  // запланированный. Состояние таймера отсюда не вещается: им владеет карточка
+  // боя, а табло без него берёт сдвиг из localStorage (B-3).
+  const currentBoutId = (() => {
     const sorted = [...(encounter?.bouts ?? [])].sort(
       (a, b) => (a.boutNumber ?? 0) - (b.boutNumber ?? 0)
     )
     return (sorted.find(b => b.status === 'InProgress') ?? sorted.find(b => b.status === 'Scheduled'))?.id
   })()
 
-  const publishShowRef = useRef<() => void>(() => {})
-  const shownTournamentId = encounter?.tournamentId
+  // Автопубликации `show` при открытии страницы больше нет (B-12, docs/09 §7):
+  // зал переключается по кнопке, а не по тому, что открыл оператор. Канал нужен
+  // только чтобы эту кнопку доставить уже открытым табло.
+  const channelRef = useRef<BroadcastChannel | null>(null)
   useEffect(() => {
-    const channel = openDisplayChannel()
-    if (!channel) return
-    const onMessage = (e: MessageEvent) => {
-      if (parseDisplayMessage(e.data)?.type === 'hello') publishShowRef.current()
-    }
-    channel.addEventListener('message', onMessage)
-    publishShowRef.current = () => {
-      if (shownBoutId && shownTournamentId) {
-        postDisplay(channel, { type: 'show', matchId: shownBoutId, tournamentId: shownTournamentId })
-      }
-    }
-    publishShowRef.current()
+    channelRef.current = openDisplayChannel()
     return () => {
-      channel.removeEventListener('message', onMessage)
-      channel.close()
+      channelRef.current?.close()
+      channelRef.current = null
     }
-  }, [shownBoutId, shownTournamentId])
+  }, [])
+
+  const encTournamentId = encounter?.tournamentId
+  const hallBoardMatchId = useHallBoardMatchId(encTournamentId)
+  const onHallBoard = hallBoardMatchId != null && hallBoardMatchId === currentBoutId
+
+  function toggleHallBoard() {
+    if (!currentBoutId || !encTournamentId) return
+    setHallBoardMatch(encTournamentId, onHallBoard ? null : currentBoutId, channelRef.current)
+  }
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['encounters', id] })
 
@@ -158,6 +167,12 @@ export default function EncounterPage() {
   const team1 = teams?.find(t => t.id === encounter.participant1Id)
   const team2 = teams?.find(t => t.id === encounter.participant2Id)
 
+  // Площадка серии: боуты идут на ней же (docs/09 §3.2).
+  const encPiste = pistes?.find(p => p.id === encounter.pisteId)
+  const encFinished =
+    isCompleted || isDoubleLoss || encounter.status === 'Cancelled' ||
+    encounter.status === 'WalkoverWin'
+
   // In-group encounter navigation: order the current group's encounters by the
   // round-robin schedule and find the previous/next sibling.
   const rrPhase = format?.phases.find(p => p.type === 'roundRobin' && !(p as any).seeding?.groups)
@@ -179,6 +194,26 @@ export default function EncounterPage() {
         {myGroup?.label != null && (
           <span style={{ color: '#888' }}>· Группа {myGroup.label}</span>
         )}
+        {encPiste && (
+          <a
+            href={pisteBoardPath(encPiste.id)}
+            target="_blank"
+            rel="noopener"
+            title="Табло площадки: показывает бой, идущий на этом ристалище, — вся серия идёт здесь же. Переоткрывать на каждый боут не нужно."
+            style={{ color: '#1976d2', whiteSpace: 'nowrap' }}
+          >
+            🖵 Табло ристалища «{encPiste.name}»
+          </a>
+        )}
+        <a
+          href={`/display/tournament/${encounter.tournamentId}`}
+          target="_blank"
+          rel="noopener"
+          title="Табло зала: показывает бой, выведенный кнопкой «Вывести на табло зала», иначе начатый последним."
+          style={{ color: '#888', whiteSpace: 'nowrap' }}
+        >
+          🖵 Табло зала (следует за выбором)
+        </a>
         <span style={{ flex: 1 }} />
         {prevEnc && (
           <Link to={`/encounters/${prevEnc.id}`} title={encLabel(prevEnc)} style={{ color: '#888', whiteSpace: 'nowrap' }}>
@@ -209,18 +244,21 @@ export default function EncounterPage() {
         display: 'flex', alignItems: 'center', gap: 16, padding: '18px 20px',
         border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa', margin: '4px 0 16px',
       }}>
-        <div style={{ flex: 1, textAlign: 'right', fontSize: '1.25em', fontWeight: 700 }}>{name1}</div>
+        {/* Стороны те же, что в боутах ниже и на табло: команда 1 — синяя,
+            команда 2 — красная. Боут наследует сторону от своей команды, поэтому
+            судья видит один и тот же цвет от серии до карточки боя. */}
+        <div style={{ flex: 1, textAlign: 'right', fontSize: '1.25em', fontWeight: 700, color: SIDE1.text }}>{name1}</div>
         <div style={{ textAlign: 'center', minWidth: 150 }}>
           <div style={{ fontSize: '3em', fontWeight: 900, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
-            {encounter.score1}
+            <span style={{ color: SIDE1.text }}>{encounter.score1}</span>
             <span style={{ color: '#ccc', margin: '0 6px', fontWeight: 300 }}>:</span>
-            {encounter.score2}
+            <span style={{ color: SIDE2.text }}>{encounter.score2}</span>
           </div>
           <div style={{ fontSize: '0.8em', color: '#aaa', marginTop: 4 }}>
             до {encounter.targetTotalScore}
           </div>
         </div>
-        <div style={{ flex: 1, fontSize: '1.25em', fontWeight: 700 }}>{name2}</div>
+        <div style={{ flex: 1, fontSize: '1.25em', fontWeight: 700, color: SIDE2.text }}>{name2}</div>
       </div>
 
       {/* Status + actions */}
@@ -232,6 +270,46 @@ export default function EncounterPage() {
         }}>
           {BOUT_STATUS_LABEL[encounter.status]}
         </span>
+
+        {/* Ристалище назначается серии целиком: она идёт на одной площадке от
+            первого боута до tie-break (docs/09 §3.2, инвариант 54). */}
+        <PisteAssign
+          target={{
+            kind: 'encounter',
+            id: encounter.id,
+            tournamentId: encounter.tournamentId,
+            pisteId: encounter.pisteId,
+          }}
+          disabled={encFinished}
+          disabledTitle="Встреча завершена: назначать площадку задним числом нечему"
+          compact
+        />
+
+        {/* Явный вывод текущего боута на табло зала (B-12): открытая карточка
+            серии сама по себе зал больше не переключает. */}
+        {currentBoutId && (
+          <button
+            onClick={toggleHallBoard}
+            title={
+              onHallBoard
+                ? 'Сейчас на табло зала текущий бой этой серии. Снять — зал вернётся к бою, начатому последним.'
+                : 'Показать текущий бой этой серии на табло зала.'
+            }
+            style={{
+              whiteSpace: 'nowrap',
+              fontSize: '0.9em',
+              cursor: 'pointer',
+              borderRadius: 4,
+              padding: '2px 10px',
+              border: onHallBoard ? '1px solid #2e7d32' : '1px solid #ccc',
+              background: onHallBoard ? '#e8f9ec' : '#fff',
+              color: onHallBoard ? '#2e7d32' : '#555',
+              fontWeight: onHallBoard ? 600 : 400,
+            }}
+          >
+            {onHallBoard ? '● Сейчас на табло зала' : 'Вывести на табло зала'}
+          </button>
+        )}
 
         {isScheduled && bouts.length === 0 && (
           <button onClick={() => generateMut.mutate()} disabled={generateMut.isPending}>
@@ -303,9 +381,9 @@ export default function EncounterPage() {
           <thead>
             <tr style={{ background: '#f5f5f5' }}>
               <th style={{ ...TH, width: 40, textAlign: 'center' }}>#</th>
-              <th style={TH}>{name1}</th>
+              <th style={{ ...TH, color: SIDE1.text, borderTop: `3px solid ${SIDE1.line}` }}>{name1}</th>
               <th style={{ ...TH, textAlign: 'center' }}>Счёт</th>
-              <th style={TH}>{name2}</th>
+              <th style={{ ...TH, color: SIDE2.text, borderTop: `3px solid ${SIDE2.line}` }}>{name2}</th>
               <th style={TH}>Статус</th>
               <th style={{ ...TH, width: 30 }} />
             </tr>

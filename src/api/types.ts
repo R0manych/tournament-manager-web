@@ -91,6 +91,22 @@ export interface Tournament {
   matchesCount: number
 }
 
+// ── Ристалище (АР-17, docs/09) ──────────────────────────────────────────────
+// Площадка, на которой физически идут бои. Заводится внутри турнира; турнир на
+// одной площадке не заводит ни одного — это основной сценарий, а не деградация
+// (§3.3), поэтому весь UI ристалищ обязан работать при пустом списке.
+export interface Piste {
+  id: string
+  tournamentId: string
+  name: string
+  orderIndex: number
+  createdAt: string
+  // Что занимает площадку прямо сейчас. Считает сервер (§5.1), чтобы UI не
+  // собирал занятость из полного списка встреч турнира.
+  currentMatchId?: string
+  currentEncounterId?: string
+}
+
 export interface Exchange {
   id: string
   sequence: number
@@ -144,6 +160,13 @@ export interface Match {
   encounterId?: string
   boutNumber?: number            // 1..9, or 10 for the tie-break bout
   targetCumulativeScore?: number // 5×boutNumber for 1..9; null for tie-break
+  // Ристалище. У боута собственный `pisteId` всегда пуст (инвариант 54) —
+  // площадку задаёт его серия, поэтому показывать и фильтровать надо по
+  // `effectivePisteId` (= pisteId ?? encounter.pisteId). `pisteName` — подпись
+  // эффективного ристалища, чтобы табло и списки не делали второй запрос.
+  pisteId?: string
+  effectivePisteId?: string
+  pisteName?: string
   startedAt?: string
   currentRoundNumber: number
   currentRoundStartedAt?: string
@@ -185,6 +208,10 @@ export interface Encounter {
   status: MatchStatus
   targetTotalScore: number
   boutDurationSeconds: number
+  // Серия занимает площадку целиком, от первого боута до tie-break (§3.2):
+  // назначается она, боуты наследуют.
+  pisteId?: string
+  pisteName?: string
   score1: number           // computed aggregate from bouts
   score2: number
   winnerParticipantId?: string
@@ -295,4 +322,27 @@ export interface CreateEncounterRequest {
 export interface CreateTieBreakRequest {
   participant1Id: string   // Fighter.Id from team 1
   participant2Id: string   // Fighter.Id from team 2
+}
+
+// ── Ристалища ───────────────────────────────────────────────────────────────
+export interface CreatePisteRequest {
+  name: string
+  orderIndex?: number   // по умолчанию — следующий свободный
+}
+
+export interface UpdatePisteRequest {
+  name: string
+  orderIndex: number
+}
+
+// Частичное обновление встречи (`PATCH /matches/{id}`). Тело заменяет блок
+// настроек целиком, поэтому назначение ристалища обязано передать текущие
+// настройки как есть — иначе они обнулятся (спека §8.1, п. 5). Явный `null` в
+// `pisteId` снимает назначение (инвариант 58), поэтому поле не optional.
+export interface AssignPisteRequest {
+  scheduledAt?: string | null
+  roundDurationSeconds?: number | null
+  maxDoubles?: number | null
+  maxWarnings?: number | null
+  pisteId: string | null
 }

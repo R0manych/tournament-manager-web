@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { BoardTimer } from '../../lib/displayChannel'
 import { openDisplayChannel, parseDisplayMessage, postDisplay } from '../../lib/displayChannel'
+import { displayShowKey, parseDisplayShow, readDisplayShow } from '../../lib/displayShow'
 
 /** Пульт молчит дольше этого — состояние таймера считаем протухшим. */
 const SILENCE_MS = 3000
@@ -25,7 +26,10 @@ export interface PushedScore {
 }
 
 export interface DisplayLink {
-  /** Бой, который «прикрепил» пульт. `null` — подходящего `show` не было. */
+  /**
+   * Бой, который оператор явно вывел на табло зала. `null` — не выводил или
+   * снял; тогда табло падает на бой, начатый последним.
+   */
   shownMatchId: string | null
   timer: BoardTimer | null
   timerMatchId: string | null
@@ -46,7 +50,13 @@ export interface DisplayLink {
 export function useDisplayLink(options: DisplayLinkOptions = {}): DisplayLink {
   const { pinned = false, tournamentId } = options
 
-  const [shownMatchId, setShownMatchId] = useState<string | null>(null)
+  // Выбор оператора читается из хранилища сразу, а не ждёт `show`: табло могли
+  // открыть или перезагрузить уже после нажатия кнопки, и тогда по каналу
+  // ничего не придёт — вещать `show` при открытии карточки боя больше некому
+  // (B-12). Закреплённое табло за выбором не следует по определению.
+  const [shownMatchId, setShownMatchId] = useState<string | null>(() =>
+    !pinned && tournamentId ? readDisplayShow(tournamentId) : null
+  )
   const [timer, setTimer] = useState<BoardTimer | null>(null)
   const [timerMatchId, setTimerMatchId] = useState<string | null>(null)
   const [timerSeenMs, setTimerSeenMs] = useState(0)
@@ -97,6 +107,19 @@ export function useDisplayLink(options: DisplayLinkOptions = {}): DisplayLink {
       channel.close()
     }
   }, [])
+
+  // Та же запись, изменённая другой вкладкой: `storage` приходит только в
+  // чужие вкладки, поэтому дублирования с сообщением `show` здесь нет — есть
+  // страховка на случай, когда канал недоступен (BroadcastChannel выключен).
+  useEffect(() => {
+    if (pinned || !tournamentId) return
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== displayShowKey(tournamentId)) return
+      setShownMatchId(parseDisplayShow(e.newValue))
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [pinned, tournamentId])
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)

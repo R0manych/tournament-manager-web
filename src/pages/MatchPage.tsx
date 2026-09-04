@@ -21,6 +21,12 @@ import {
   parseDisplayMessage,
   postDisplay,
 } from '../lib/displayChannel'
+import { setHallBoardMatch, useHallBoardMatchId } from '../components/display/useHallBoard'
+import PisteAssign from '../components/PisteAssign'
+import { usePistes } from '../components/usePistes'
+import { pisteBoardPath } from '../lib/pisteBoard'
+import { SIDE1, SIDE2 } from '../lib/sideColors'
+import { orderMatchesForPlay } from '../components/bracket/bracketUtils'
 
 // ─── Fight Timer ──────────────────────────────────────────────────────────────
 
@@ -237,6 +243,22 @@ export default function MatchPage() {
     refetchInterval: q => (q.state.data?.status === 'InProgress' ? 5000 : false),
   })
 
+  // Ристалища турнира: подпись площадки и ссылка на её табло. Пустой список —
+  // штатный турнир на одной площадке (docs/09 §3.3), тогда всё это не рисуется.
+  const { data: pistes } = usePistes(match?.tournamentId)
+  const hasPistes = (pistes?.length ?? 0) > 0
+
+  // Формат — только ради порядка соседних боёв: он задаёт очерёдность фаз и
+  // раундов, без него ячейки выстроились бы по своим id. 404 — законный ответ
+  // (формат не загружен), повторять запрос незачем.
+  const { data: format } = useQuery({
+    queryKey: ['tournament-format', match?.tournamentId],
+    queryFn: () => tournamentsApi.format.get(match!.tournamentId),
+    enabled: !!match?.tournamentId,
+    retry: (failureCount, error: unknown) =>
+      (error as { status?: number })?.status !== 404 && failureCount < 2,
+  })
+
   // Якорь отсчёта — `currentRoundStartedAt` (ТЗ §7.4). Перехода раунда в UI нет
   // (раундов в дисциплине нет, серия — это отдельные встречи, АР-15), поэтому
   // якорь совпадает со `startedAt`; он же и фолбэк, если метки раунда нет.
@@ -353,10 +375,15 @@ export default function MatchPage() {
   }, [match?.id, anchorMs])
 
   // ─── Вещание на табло (АР-14) ───────────────────────────────────────────────
-  // Эта вкладка — пульт: она сообщает табло, какой бой смотрит организатор, и
-  // нормализованное состояние таймера. Тик не передаётся: табло тикает само от
+  // Эта вкладка — пульт: она сообщает табло нормализованное состояние таймера и
+  // счёт сразу после схода. Тик не передаётся: табло тикает само от
   // `deadlineMs`. Пауза живёт только на клиенте (АР-1), поэтому без этого канала
   // табло разошлось бы с пультом на всех паузах.
+  //
+  // Чего здесь больше НЕТ — `show` при открытии страницы. Открытая карточка боя
+  // означала «показывай это залу», и зал переключался на бой, в который
+  // оператор просто заглянул уточнить счёт (B-12). Теперь `show` уходит только
+  // по кнопке «Вывести на табло зала» (docs/09 §7).
   const channelRef = useRef<BroadcastChannel | null>(null)
   const publishRef = useRef<() => void>(() => {})
 
@@ -387,7 +414,6 @@ export default function MatchPage() {
     publishRef.current = () => {
       const channel = channelRef.current
       if (!channel) return
-      postDisplay(channel, { type: 'show', matchId, tournamentId })
       postDisplay(channel, {
         type: 'timer',
         matchId,
@@ -422,6 +448,22 @@ export default function MatchPage() {
     score?.score2,
     score?.doubleHitsCount,
   ])
+
+  // ─── «Вывести на табло зала» (B-12, docs/09 §7) ─────────────────────────────
+  // Явное действие вместо автопубликации: зал переключается по решению
+  // оператора, а не по тому, какую вкладку он открыл. Решение хранится (общее
+  // для вкладок одного браузера) — иначе табло, перезагруженное после нажатия,
+  // о нём бы не узнало: отвечать на `hello` теперь некому.
+  //
+  // Это про турниры без ристалищ (docs/09 §3.3). Там, где площадки заведены,
+  // табло ристалища знает свой бой из данных, и кнопка ему не нужна.
+  const hallBoardMatchId = useHallBoardMatchId(match?.tournamentId)
+  const onHallBoard = hallBoardMatchId != null && hallBoardMatchId === match?.id
+
+  function toggleHallBoard() {
+    if (!match) return
+    setHallBoardMatch(match.tournamentId, onHallBoard ? null : match.id, channelRef.current)
+  }
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['matches', id] })
@@ -621,6 +663,10 @@ export default function MatchPage() {
   if (isLoading) return <p>Загрузка...</p>
   if (!match) return <p>Встреча не найдена</p>
 
+  // Площадка боя — эффективная: у боута собственный `pisteId` пуст всегда
+  // (инвариант 54), площадку задаёт его серия.
+  const matchPiste = pistes?.find(p => p.id === match.effectivePisteId)
+
   const isBye = match.fighter2Id == null
   const name1 = f1 ? `${f1.firstName} ${f1.lastName}` : '…'
   const name2 = isBye ? 'БАЙ' : (f2 ? `${f2.firstName} ${f2.lastName}` : '…')
@@ -654,20 +700,42 @@ export default function MatchPage() {
       ? tournament?.participants.find(p => p.participantId === encounter.priorityParticipantId)
       : undefined
 
-  // Adjacent match navigation
-  const sortedMatches = [...(tournamentMatches ?? [])].sort((a, b) => {
-    const ta = a.scheduledAt ?? a.createdAt
-    const tb = b.scheduledAt ?? b.createdAt
-    return ta.localeCompare(tb)
-  })
-  const currentIdx = sortedMatches.findIndex(m => m.id === id)
+  // ─── Соседние бои ───────────────────────────────────────────────────────────
+  // Порядок — тот же, что в списке встреч и на табло (`orderMatchesForPlay`):
+  // ячейки по формату, внутри ячейки очередь боёв. Раньше здесь была своя
+  // сортировка по времени, и пульт звал одну пару, а зал обещал другую — у
+  // сгенерированных одним запросом встреч `createdAt` совпадает до
+  // миллисекунды, поэтому время само по себе порядка не задавало.
+  const ordered = orderMatchesForPlay(tournamentMatches ?? [], format)
+
+  // Ристалища заведены — очередь принадлежит площадке: следующим на пульте
+  // должен быть следующий бой ЭТОГО ристалища, а не турнира. Иначе оператор
+  // зовёт пару, которая пойдёт на соседней площадке.
+  const scopeMatches = hasPistes
+    ? ordered.filter(m => m.effectivePisteId === match.effectivePisteId)
+    : ordered
+
+  // Бой без площадки при заведённых ристалищах: очереди у него нет вовсе, и
+  // подставлять общетурнирную нельзя — она соврёт. Ниже про это предупреждение.
+  const unassigned = hasPistes && match.effectivePisteId == null
+
+  const currentIdx = unassigned ? -1 : scopeMatches.findIndex(m => m.id === id)
   // Bouts are navigated through their encounter page, not the flat match list.
-  const prevMatch = !isBout && currentIdx > 0 ? sortedMatches[currentIdx - 1] : null
-  const nextMatch = !isBout && currentIdx >= 0 && currentIdx < sortedMatches.length - 1
-    ? sortedMatches[currentIdx + 1]
+  const prevMatch = !isBout && currentIdx > 0 ? scopeMatches[currentIdx - 1] : null
+  const nextMatch = !isBout && currentIdx >= 0 && currentIdx < scopeMatches.length - 1
+    ? scopeMatches[currentIdx + 1]
     : null
 
-  function matchLabel(m: typeof sortedMatches[0]) {
+  // Предупреждение вместо молчания: с ристалищами пустая навигация означает
+  // «на этой площадке больше ничего не назначено», и оператор должен узнать об
+  // этом здесь, а не выяснить у ковра.
+  const queueWarning =
+    isBout || !hasPistes ? null
+    : unassigned ? 'Бой не назначен на ристалище — очередь площадки неизвестна'
+    : !nextMatch ? `На ристалище «${matchPiste?.name ?? '—'}» это последний назначенный бой`
+    : null
+
+  function matchLabel(m: typeof ordered[0]) {
     const p1 = tournament?.participants.find(p => p.participantId === m.fighter1Id)
     const p2 = tournament?.participants.find(p => p.participantId === m.fighter2Id)
     return `${p1 ? participantShortName(p1) : '?'} – ${p2 ? participantShortName(p2) : '?'}`
@@ -685,15 +753,59 @@ export default function MatchPage() {
         <Link to={`/tournaments/${match.tournamentId}/matches`} style={{ color: '#888', whiteSpace: 'nowrap' }}>
           ← Встречи
         </Link>
+        {/* Три табло с честными подписями (B-12, п. 3): раньше отсюда была
+            достижима только закреплённая ссылка, и оператор переоткрывал её на
+            каждый бой, считая это единственным табло. */}
+        {matchPiste && (
+          <a
+            href={pisteBoardPath(matchPiste.id)}
+            target="_blank"
+            rel="noopener"
+            title="Табло площадки: само показывает бой, идущий на этом ристалище, и следующую пару этой же площадки. Переоткрывать на каждый бой не нужно."
+            style={{ color: '#1976d2', whiteSpace: 'nowrap' }}
+          >
+            🖵 Табло ристалища «{matchPiste.name}»
+          </a>
+        )}
         <a
           href={`/display/match/${match.id}`}
           target="_blank"
           rel="noopener"
-          title="Табло, закреплённое за этим боем: не переключится, когда рядом идут другие бои. Перетащите вкладку на второй монитор ристалища."
+          title="Табло, закреплённое за этим боем: не переключится ни на какой другой. Для финала на большом экране."
           style={{ color: '#888', whiteSpace: 'nowrap' }}
         >
-          🖵 Табло этого боя
+          🖵 Табло этого боя (не переключится)
         </a>
+        <a
+          href={`/display/tournament/${match.tournamentId}`}
+          target="_blank"
+          rel="noopener"
+          title="Табло зала: показывает бой, выведенный кнопкой «Вывести на табло зала», иначе начатый последним."
+          style={{ color: '#888', whiteSpace: 'nowrap' }}
+        >
+          🖵 Табло зала (следует за выбором)
+        </a>
+        <button
+          onClick={toggleHallBoard}
+          title={
+            onHallBoard
+              ? 'Сейчас на табло зала этот бой. Снять — зал вернётся к бою, начатому последним.'
+              : 'Показать этот бой на табло зала. Пока не нажать, зал не переключится: открытая карточка боя сама по себе ничего не выводит.'
+          }
+          style={{
+            whiteSpace: 'nowrap',
+            fontSize: '0.9em',
+            cursor: 'pointer',
+            borderRadius: 4,
+            padding: '2px 10px',
+            border: onHallBoard ? '1px solid #2e7d32' : '1px solid #ccc',
+            background: onHallBoard ? '#e8f9ec' : '#fff',
+            color: onHallBoard ? '#2e7d32' : '#555',
+            fontWeight: onHallBoard ? 600 : 400,
+          }}
+        >
+          {onHallBoard ? '● Сейчас на табло зала' : 'Вывести на табло зала'}
+        </button>
         <span style={{ flex: 1 }} />
         {prevMatch && (
           <Link
@@ -719,6 +831,25 @@ export default function MatchPage() {
           >
             {matchLabel(nextMatch)} →
           </Link>
+        )}
+        {/* Очередь площадки кончилась (или бой на неё не назначен). Пустая
+            навигация выглядела бы как «дальше ничего нет по турниру», а это
+            другое утверждение — поэтому говорим прямо. */}
+        {queueWarning && (
+          <span
+            title="Следующий бой берётся из очереди этого ристалища. Назначьте на площадку следующую встречу — она появится здесь."
+            style={{
+              whiteSpace: 'nowrap',
+              fontSize: '0.85em',
+              padding: '2px 10px',
+              borderRadius: 10,
+              background: '#fff4e5',
+              color: '#a86500',
+              fontWeight: 600,
+            }}
+          >
+            ⚠ {queueWarning}
+          </span>
         )}
       </div>
 
@@ -784,12 +915,32 @@ export default function MatchPage() {
             {new Date(match.scheduledAt).toLocaleString('ru')}
           </span>
         )}
+        {/* Ристалище — рядом со статусом (docs/09 §6.2). У боута оно своё
+            только через серию, поэтому здесь оно показано, но не правится:
+            назначить площадку отдельному боуту нельзя (инвариант 54). */}
+        {isBout ? (
+          matchPiste && (
+            <span style={{ fontSize: '0.85em', color: '#888' }} title="Площадка серии: боут идёт там же, где вся серия">
+              🏟 {matchPiste.name} <span style={{ color: '#bbb' }}>(от серии)</span>
+            </span>
+          )
+        ) : (
+          <PisteAssign
+            target={{ kind: 'match', match }}
+            disabled={isCompleted || isWalkover || isDoubleLoss || match.status === 'Cancelled'}
+            disabledTitle="Бой завершён: назначать площадку задним числом нечему"
+            compact
+          />
+        )}
       </div>
 
-      {/* Scoreboard */}
+      {/* Scoreboard. Стороны маркированы цветом так же, как на табло (АР-14):
+          участник 1 — синий слева, участник 2 — красный справа. Судья за
+          пультом и зал смотрят один бой, и расхождение сторон стоит укола,
+          начисленного не тому. */}
       <div style={SCOREBOARD}>
-        <div style={{ flex: 1, textAlign: 'right' }}>
-          <div style={{ fontSize: '1.15em', fontWeight: 700 }}>{name1}</div>
+        <div style={{ ...SIDE_PANEL, borderTopColor: SIDE1.line, background: SIDE1.wash, textAlign: 'right' }}>
+          <div style={{ fontSize: '1.15em', fontWeight: 700, color: SIDE1.text }}>{name1}</div>
           {f1?.club && <div style={{ fontSize: '0.82em', color: '#888' }}>{f1.club}</div>}
           {(match.warnings1 > 0 || isInProgress) && (
             <div style={{ marginTop: 6, fontSize: '0.85em', color: warn1Over ? 'var(--c-danger)' : '#c88' }}>
@@ -810,9 +961,9 @@ export default function MatchPage() {
             letterSpacing: 6,
             fontVariantNumeric: 'tabular-nums',
           }}>
-            {match.score1}
+            <span style={{ color: SIDE1.text }}>{match.score1}</span>
             <span style={{ color: '#ccc', margin: '0 4px', fontWeight: 300 }}>:</span>
-            {match.score2}
+            <span style={{ color: SIDE2.text }}>{match.score2}</span>
           </div>
           <div style={{ marginTop: 6, fontSize: '0.8em', color: doublesOver ? 'var(--c-danger)' : '#aaa' }}>
             ⚔ {match.doubleHitsCount}{doublesLimit != null && ` / ${doublesLimit}`}
@@ -820,8 +971,8 @@ export default function MatchPage() {
           </div>
         </div>
 
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: '1.15em', fontWeight: 700 }}>{name2}</div>
+        <div style={{ ...SIDE_PANEL, borderTopColor: SIDE2.line, background: SIDE2.wash }}>
+          <div style={{ fontSize: '1.15em', fontWeight: 700, color: SIDE2.text }}>{name2}</div>
           {f2?.club && <div style={{ fontSize: '0.82em', color: '#888' }}>{f2.club}</div>}
           {(match.warnings2 > 0 || isInProgress) && (
             <div style={{ marginTop: 6, fontSize: '0.85em', color: warn2Over ? 'var(--c-danger)' : '#c88' }}>
@@ -954,34 +1105,37 @@ export default function MatchPage() {
           {/* Warnings */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '0 0 16px', alignItems: 'center', justifyContent: 'center' }}>
             <span style={{ color: '#666', fontSize: '0.85em' }}>Предупреждения:</span>
-            <button onClick={() => warnMut.mutate({ f1d: 1 })} disabled={warnMut.isPending}>⚠+ {short1}</button>
-            <button onClick={() => warnMut.mutate({ f1d: -1 })} disabled={warnMut.isPending || match.warnings1 === 0}>⚠− {short1}</button>
-            <button onClick={() => warnMut.mutate({ f2d: 1 })} disabled={warnMut.isPending}>⚠+ {short2}</button>
-            <button onClick={() => warnMut.mutate({ f2d: -1 })} disabled={warnMut.isPending || match.warnings2 === 0}>⚠− {short2}</button>
+            <button onClick={() => warnMut.mutate({ f1d: 1 })} disabled={warnMut.isPending} style={SIDE_BTN1}>⚠+ {short1}</button>
+            <button onClick={() => warnMut.mutate({ f1d: -1 })} disabled={warnMut.isPending || match.warnings1 === 0} style={SIDE_BTN1}>⚠− {short1}</button>
+            <button onClick={() => warnMut.mutate({ f2d: 1 })} disabled={warnMut.isPending} style={SIDE_BTN2}>⚠+ {short2}</button>
+            <button onClick={() => warnMut.mutate({ f2d: -1 })} disabled={warnMut.isPending || match.warnings2 === 0} style={SIDE_BTN2}>⚠− {short2}</button>
           </div>
 
           {/* Видеоповторы. Отдельным рядом от предупреждений: это не санкция, а
               израсходованный ресурс стороны, и путать их кнопками нельзя. */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '0 0 16px', alignItems: 'center', justifyContent: 'center' }}>
             <span style={{ color: '#666', fontSize: '0.85em' }}>Видеоповторы:</span>
-            <button onClick={() => replayMut.mutate({ f1d: 1 })} disabled={replayMut.isPending}>🎥+ {short1}</button>
-            <button onClick={() => replayMut.mutate({ f1d: -1 })} disabled={replayMut.isPending || match.videoReplays1 === 0}>🎥− {short1}</button>
-            <button onClick={() => replayMut.mutate({ f2d: 1 })} disabled={replayMut.isPending}>🎥+ {short2}</button>
-            <button onClick={() => replayMut.mutate({ f2d: -1 })} disabled={replayMut.isPending || match.videoReplays2 === 0}>🎥− {short2}</button>
+            <button onClick={() => replayMut.mutate({ f1d: 1 })} disabled={replayMut.isPending} style={SIDE_BTN1}>🎥+ {short1}</button>
+            <button onClick={() => replayMut.mutate({ f1d: -1 })} disabled={replayMut.isPending || match.videoReplays1 === 0} style={SIDE_BTN1}>🎥− {short1}</button>
+            <button onClick={() => replayMut.mutate({ f2d: 1 })} disabled={replayMut.isPending} style={SIDE_BTN2}>🎥+ {short2}</button>
+            <button onClick={() => replayMut.mutate({ f2d: -1 })} disabled={replayMut.isPending || match.videoReplays2 === 0} style={SIDE_BTN2}>🎥− {short2}</button>
           </div>
 
           {/* Quick score */}
           <div style={{ margin: '0 0 20px', padding: '16px', border: '1px solid #ddd', borderRadius: 8, background: '#fafafa' }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: '0.85em', color: '#555', marginBottom: 6, fontWeight: 600 }}>{short1}</div>
+              {/* Колонка начисления окрашена в цвет своей стороны: под
+                  таймером судья целится в кнопку, а не читает подпись, и
+                  промах здесь — укол не тому бойцу. */}
+              <div style={{ ...SCORE_COLUMN, borderTopColor: SIDE1.line, background: SIDE1.wash }}>
+                <div style={{ fontSize: '0.85em', color: SIDE1.text, marginBottom: 6, fontWeight: 700 }}>{short1}</div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   {[1, 2, 3].map(p => (
                     <button
                       key={p}
                       onClick={() => quickScore(p, 0)}
                       disabled={scoreBusy}
-                      style={BTN_SCORE}
+                      style={{ ...BTN_SCORE, color: SIDE1.text, borderColor: SIDE1.border }}
                     >
                       +{p}
                     </button>
@@ -1022,15 +1176,15 @@ export default function MatchPage() {
                 </div>
               </div>
 
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: '0.85em', color: '#555', marginBottom: 6, fontWeight: 600 }}>{short2}</div>
+              <div style={{ ...SCORE_COLUMN, borderTopColor: SIDE2.line, background: SIDE2.wash }}>
+                <div style={{ fontSize: '0.85em', color: SIDE2.text, marginBottom: 6, fontWeight: 700 }}>{short2}</div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   {[1, 2, 3].map(p => (
                     <button
                       key={p}
                       onClick={() => quickScore(0, p)}
                       disabled={scoreBusy}
-                      style={BTN_SCORE}
+                      style={{ ...BTN_SCORE, color: SIDE2.text, borderColor: SIDE2.border }}
                     >
                       +{p}
                     </button>
@@ -1080,8 +1234,8 @@ export default function MatchPage() {
           <thead>
             <tr style={{ background: '#f5f5f5' }}>
               <th style={TH}>#</th>
-              <th style={TH}>{name1}</th>
-              <th style={TH}>{name2}</th>
+              <th style={{ ...TH, color: SIDE1.text, borderTop: `3px solid ${SIDE1.line}` }}>{name1}</th>
+              <th style={{ ...TH, color: SIDE2.text, borderTop: `3px solid ${SIDE2.line}` }}>{name2}</th>
               <th style={{ ...TH, textAlign: 'center' }}>Обоюдный</th>
               <th style={TH}>Заметка</th>
               {isInProgress && <th style={TH} />}
@@ -1101,8 +1255,8 @@ export default function MatchPage() {
           <tfoot>
             <tr style={{ fontWeight: 600, background: '#f9f9f9' }}>
               <td style={TD}>Итого</td>
-              <td style={TD}>{match.score1}</td>
-              <td style={TD}>{match.score2}</td>
+              <td style={{ ...TD, color: SIDE1.text }}>{match.score1}</td>
+              <td style={{ ...TD, color: SIDE2.text }}>{match.score2}</td>
               <td style={{ ...TD, textAlign: 'center' }}>{match.doubleHitsCount}</td>
               <td style={TD} colSpan={isInProgress ? 2 : 1} />
             </tr>
@@ -1130,12 +1284,46 @@ export default function MatchPage() {
 const SCOREBOARD: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  gap: 16,
+  gap: 12,
   margin: '0 0 8px',
-  padding: '16px 20px',
+  padding: '12px 14px',
   border: '1px solid #e0e0e0',
   borderRadius: 8,
   background: '#fafafa',
+}
+
+// Блок стороны в шапке и колонка её кнопок. Цвет задаётся на месте (`borderTopColor`
+// и `background` из `SIDE1`/`SIDE2`): форма у сторон общая, различает их только
+// цвет — и позиция, которая от него не зависит.
+//
+// Полоса сверху, а не рамка целиком: так блок читается как «шапка стороны» и
+// повторяет табло, где над панелью участника идёт такая же полоса.
+// Кнопки предупреждений и повторов подписаны фамилией, но подпись читают уже
+// после того, как рука пошла к кнопке: цвет здесь работает раньше текста.
+const SIDE_BTN: React.CSSProperties = {
+  borderWidth: 1,
+  borderStyle: 'solid',
+  borderRadius: 4,
+  padding: '3px 10px',
+  cursor: 'pointer',
+  background: '#fff',
+}
+
+const SIDE_BTN1: React.CSSProperties = { ...SIDE_BTN, color: SIDE1.text, borderColor: SIDE1.border }
+const SIDE_BTN2: React.CSSProperties = { ...SIDE_BTN, color: SIDE2.text, borderColor: SIDE2.border }
+
+const SIDE_PANEL: React.CSSProperties = {
+  flex: 1,
+  padding: '10px 14px',
+  borderRadius: 6,
+  borderTop: '3px solid transparent',
+}
+
+const SCORE_COLUMN: React.CSSProperties = {
+  textAlign: 'center',
+  padding: '10px 14px',
+  borderRadius: 6,
+  borderTop: '3px solid transparent',
 }
 
 const TH: React.CSSProperties = {

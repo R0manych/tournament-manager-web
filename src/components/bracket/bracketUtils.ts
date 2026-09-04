@@ -344,6 +344,26 @@ export function compareBoutOrder(
   return comparePlacements(key(a), key(b), format)
 }
 
+/**
+ * Порядок проведения боёв — тот же, что в списке встреч у организатора: ячейки
+ * по формату, внутри ячейки — очередь боёв. Сортировка по времени осталась
+ * запасной ступенью для встреч без размещения: у сгенерированных одним запросом
+ * `createdAt` совпадает до миллисекунды, поэтому сама по себе порядка не задаёт.
+ *
+ * Один вызов на все три экрана (список, карточка боя, табло): «следующий бой»
+ * обязан означать одно и то же везде, иначе пульт зовёт одну пару, а зал
+ * обещает другую.
+ */
+export function orderMatchesForPlay<T extends OrderableMatch & { scheduledAt?: string; createdAt: string }>(
+  matches: T[],
+  format: TournamentFormat | null | undefined,
+): T[] {
+  const order = buildBoutOrder(matches)
+  return [...matches]
+    .sort((a, b) => (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt))
+    .sort((a, b) => compareBoutOrder(a, b, format, order))
+}
+
 export function describePlacement(
   placement: MatchPlacementRef | undefined,
   format: TournamentFormat | null | undefined,
@@ -533,6 +553,59 @@ export function groupsFromSaved(
         name: participantName(p),
       })),
   }))
+}
+
+export interface SavedGroupsDrift {
+  /**
+   * Зарегистрированы в турнире, но не лежат ни в одной сохранённой группе фазы.
+   * Почти всегда — те, кого добавили уже после сохранения состава.
+   */
+  unassigned: GroupAssignment['participants']
+  /**
+   * Сколько участников сохранённого состава больше не зарегистрированы (снялись).
+   * Из групп они убраны, но знать об этом организатор обязан: состав ужался, и
+   * сетка группового этапа больше не соответствует сохранённой.
+   */
+  withdrawnCount: number
+}
+
+/**
+ * Расхождение сохранённого состава групп с текущим списком участников.
+ *
+ * Состав групп персистится отдельно от регистрации, и эти два списка живут
+ * своей жизнью: участника можно снять или дозаявить уже после того, как группы
+ * сохранены. `groupsFromSaved` показывает только пересечение — снявшиеся молча
+ * пропадают, а дозаявленные не появляются нигде вовсе, из-за чего их
+ * невозможно ни увидеть, ни перетащить в группу.
+ *
+ * Здесь считается то, что при этом теряется. Возвращает пустое расхождение,
+ * когда для фазы ничего не сохранено: там работает snake-посев, который
+ * раскладывает всех актуальных участников сам.
+ */
+export function savedGroupsDrift(
+  saved: TournamentGroup[] | undefined,
+  phaseId: string,
+  participants: TournamentParticipant[],
+): SavedGroupsDrift {
+  const phaseGroups = (saved ?? []).filter(g => g.phaseId === phaseId)
+  if (phaseGroups.length === 0) return { unassigned: [], withdrawnCount: 0 }
+
+  const savedIds = new Set(phaseGroups.flatMap(g => g.participantIds))
+  const registeredIds = new Set(participants.map(p => p.participantId))
+
+  const unassigned = participants
+    .filter(p => !savedIds.has(p.participantId))
+    .sort((a, b) => (a.seed ?? 999) - (b.seed ?? 999))
+    .map((p, idx) => ({
+      fighterId: p.participantId,
+      seed: p.seed ?? idx + 1,
+      name: participantName(p),
+    }))
+
+  let withdrawnCount = 0
+  for (const id of savedIds) if (!registeredIds.has(id)) withdrawnCount++
+
+  return { unassigned, withdrawnCount }
 }
 
 // Saved composition wins; otherwise snake seeding. Explicit-seeded phases
