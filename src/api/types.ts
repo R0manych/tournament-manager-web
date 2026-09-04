@@ -11,13 +11,14 @@ export type MatchStatus =
   | 'DoubleLoss'
 export type ParticipantKind = 'Fighter' | 'Team'
 
+// Полей `city`/`birthDate` у бойца нет: ни в `Fighter`, ни в `FighterResponse`.
+// Они были объявлены здесь, но сервер их не возвращает и в `POST /fighters`
+// молча выбрасывает — экраны, которые их рисовали, были мертвы.
 export interface Fighter {
   id: string
   firstName: string
   lastName: string
   club?: string
-  city?: string
-  birthDate?: string
   createdAt: string
 }
 
@@ -89,6 +90,17 @@ export interface Tournament {
   createdAt: string
   participants: TournamentParticipant[]
   matchesCount: number
+}
+
+/**
+ * Турнир в списке (`GET /tournaments` → `TournamentSummaryResponse`). Состава
+ * участников в нём **нет** — только их количество. Отдельный тип, потому что
+ * список типизированный как `Tournament` обещал обязательный `participants`,
+ * которого в ответе никогда не было: первое же обращение к нему — `TypeError`
+ * при зелёном компиляторе.
+ */
+export type TournamentSummary = Omit<Tournament, 'participants'> & {
+  participantsCount: number
 }
 
 // ── Ристалище (АР-17, docs/09) ──────────────────────────────────────────────
@@ -273,8 +285,6 @@ export interface CreateFighterRequest {
   firstName: string
   lastName: string
   club?: string
-  city?: string
-  birthDate?: string
 }
 
 export type UpdateFighterRequest = CreateFighterRequest

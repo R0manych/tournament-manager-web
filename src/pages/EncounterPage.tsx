@@ -107,12 +107,31 @@ export default function EncounterPage() {
 
   const encTournamentId = encounter?.tournamentId
   const hallBoardMatchId = useHallBoardMatchId(encTournamentId)
-  const onHallBoard = hallBoardMatchId != null && hallBoardMatchId === currentBoutId
+  // «На табло зала» — про серию целиком, а не про конкретный боут. Выбор
+  // хранится боем (один ключ на турнир), поэтому кнопка считается нажатой,
+  // пока в зале любой боут ЭТОЙ серии: иначе после каждого сыгранного боута
+  // она показывала бы «Вывести», хотя зал всё ещё ведёт эту серию.
+  const onHallBoard =
+    hallBoardMatchId != null && (encounter?.bouts ?? []).some(b => b.id === hallBoardMatchId)
 
   function toggleHallBoard() {
-    if (!currentBoutId || !encTournamentId) return
-    setHallBoardMatch(encTournamentId, onHallBoard ? null : currentBoutId, channelRef.current)
+    if (!encTournamentId) return
+    if (onHallBoard) {
+      setHallBoardMatch(encTournamentId, null, channelRef.current)
+      return
+    }
+    if (!currentBoutId) return
+    setHallBoardMatch(encTournamentId, currentBoutId, channelRef.current)
   }
+
+  // Серия ведёт зал, но выведен там уже отыгранный боут: перецеливаем на
+  // текущий. Без этого зал держался бы на завершённом бое до конца удержания
+  // результата и только потом падал на «бой, начатый последним».
+  useEffect(() => {
+    if (!encTournamentId || !onHallBoard || !currentBoutId) return
+    if (hallBoardMatchId === currentBoutId) return
+    setHallBoardMatch(encTournamentId, currentBoutId, channelRef.current)
+  }, [encTournamentId, onHallBoard, currentBoutId, hallBoardMatchId])
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ['encounters', id] })
 
@@ -322,7 +341,24 @@ export default function EncounterPage() {
           </button>
         )}
         {isInProgress && (
-          <button onClick={() => statusMut.mutate('Completed')} disabled={statusMut.isPending}>
+          <button
+            onClick={() => {
+              // Сервер закроет серию по текущей сумме и назначит победителя.
+              // На незавершённых боутах это меняет таблицу группы, поэтому
+              // спрашиваем — как и у кнопки двойного поражения рядом.
+              const unfinished = encounter.bouts.filter(
+                b => b.status === 'Scheduled' || b.status === 'InProgress'
+              ).length
+              if (unfinished > 0 && !window.confirm(
+                `В серии ещё ${unfinished} несыгранных боёв. Завершить встречу сейчас?
+
+` +
+                'Победитель определится по текущему счёту, и результат уйдёт в таблицу группы.'
+              )) return
+              statusMut.mutate('Completed')
+            }}
+            disabled={statusMut.isPending}
+          >
             ✓ Завершить встречу
           </button>
         )}
@@ -361,8 +397,11 @@ export default function EncounterPage() {
         </p>
       )}
 
-      {/* Tie-break section */}
-      {encounter.requiresTieBreak && (
+      {/* Tie-break section. Только у идущей серии: `requiresTieBreak` считается
+          по счёту и боутам и статуса не знает, поэтому у серии, закрытой
+          двойным поражением при ничейном счёте, под баннером «победителя нет»
+          висело предложение доиграть — и кнопка работала. */}
+      {encounter.requiresTieBreak && isInProgress && (
         <TieBreakSection
           encounterId={id!}
           team1={team1}

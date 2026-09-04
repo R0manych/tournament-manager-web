@@ -17,11 +17,12 @@ export const matchesApi = {
   // `pisteId` фильтрует по эффективному ристалищу (docs/09 §5.4): боут приходит
   // в выборку своей серии. Нужен табло ристалища и очереди по площадке — без
   // него оба тянули бы все встречи турнира и фильтровали на клиенте.
-  listByTournament: (tournamentId: string, pisteId?: string) =>
+  listByTournament: (tournamentId: string, pisteId?: string, signal?: AbortSignal) =>
     api.get<Match[]>(
-      `/tournaments/${tournamentId}/matches${pisteId ? `?pisteId=${pisteId}` : ''}`
+      `/tournaments/${tournamentId}/matches${pisteId ? `?pisteId=${pisteId}` : ''}`,
+      signal,
     ),
-  get: (id: string) => api.get<Match>(`/matches/${id}`),
+  get: (id: string, signal?: AbortSignal) => api.get<Match>(`/matches/${id}`, signal),
   create: (tournamentId: string, data: CreateMatchRequest) =>
     api.post<Match>(`/tournaments/${tournamentId}/matches`, data),
   delete: (id: string) => api.delete(`/matches/${id}`),

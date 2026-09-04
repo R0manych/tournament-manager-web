@@ -12,7 +12,12 @@ import { pistesApi } from '../api/pistes'
 export function usePistes(tournamentId: string | undefined) {
   return useQuery({
     queryKey: ['pistes', tournamentId],
-    queryFn: () => pistesApi.listByTournament(tournamentId!),
+    queryFn: ({ signal }) => pistesApi.listByTournament(tournamentId!, signal),
     enabled: !!tournamentId,
+    // На табло нет ни фокуса, ни перемонтирования, поэтому без интервала
+    // список читался ровно один раз за всю жизнь вкладки: площадку, заведённую
+    // после открытия табло, экран не увидел бы до перезагрузки и так и остался
+    // бы в общетурнирном режиме, обещая залу чужую «следующую пару».
+    refetchInterval: 60_000,
   })
 }

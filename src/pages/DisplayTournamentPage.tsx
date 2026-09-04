@@ -1,7 +1,9 @@
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useParams } from 'react-router-dom'
 import { matchesApi } from '../api/matches'
-import MatchBoard, { WaitingBoard } from '../components/display/MatchBoard'
+import type { Match } from '../api/types'
+import MatchBoard, { RESULT_HOLD_MS, WaitingBoard } from '../components/display/MatchBoard'
 import { useDisplayLink } from '../components/display/useDisplayLink'
 
 /**
@@ -19,10 +21,18 @@ export default function DisplayTournamentPage() {
 
   const { data: matches } = useQuery({
     queryKey: ['tournament-matches', id],
-    queryFn: () => matchesApi.listByTournament(id!),
+    queryFn: ({ signal }) => matchesApi.listByTournament(id!, undefined, signal),
     enabled: !!id,
     refetchInterval: 5000,
   })
+
+  // Часы для срока удержания результата: тикают отдельно от поллинга, иначе
+  // возврат к живому бою запаздывал бы до следующего ответа сервера.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
 
   const active = (matches ?? [])
     .filter(m => m.status === 'InProgress')
@@ -31,8 +41,26 @@ export default function DisplayTournamentPage() {
   // `show` мог прийти про бой другого турнира только до того, как список
   // загрузился, — сверяем принадлежность, когда есть с чем сверять.
   const shown = link.shownMatchId
-  const shownBelongs = !matches || matches.some(m => m.id === shown)
-  const matchId = (shownBelongs ? shown : null) ?? active?.id
+  const shownMatch = (matches ?? []).find(m => m.id === shown)
+  const shownBelongs = !matches || shown == null || shownMatch != null
+
+  // Выбор оператора держится, пока бой живой, и ещё 20 секунд после итога —
+  // ровно столько же, сколько сам `MatchBoard` держит результат на экране.
+  // Бессрочный приоритет означал бы, что зал навсегда застревает на
+  // завершённом бое: следующий, уже идущий, туда не попадёт, пока оператор не
+  // вспомнит про кнопку снятия. В сериях это происходило после каждого боута.
+  const shownExpired = (m: Match | undefined): boolean => {
+    if (!m) return false
+    if (m.status === 'Scheduled' || m.status === 'InProgress') return false
+    const endedMs = m.endedAt ? new Date(m.endedAt).getTime() : null
+    return endedMs == null || now - endedMs > RESULT_HOLD_MS
+  }
+
+  // Просроченный выбор не возвращается запасным вариантом: если живого боя
+  // нет, зал уходит на экран ожидания со следующей парой, а не остаётся на
+  // старом результате.
+  const pinned = shownBelongs && !shownExpired(shownMatch) ? shown : null
+  const matchId = pinned ?? active?.id
 
   if (!matchId) return <WaitingBoard tournamentId={id} />
   return <MatchBoard matchId={matchId} link={link} />

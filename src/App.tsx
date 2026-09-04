@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Layout from './components/Layout'
 import TournamentsPage from './pages/TournamentsPage'
@@ -7,15 +8,31 @@ import TournamentMatchesPage from './pages/TournamentMatchesPage'
 import FightersPage from './pages/FightersPage'
 import MatchPage from './pages/MatchPage'
 import EncounterPage from './pages/EncounterPage'
-import DisplayMatchPage from './pages/DisplayMatchPage'
-import DisplayPistePage from './pages/DisplayPistePage'
-import DisplayTournamentPage from './pages/DisplayTournamentPage'
-import DisplayBoardPage from './pages/DisplayBoardPage'
 import NotFoundPage from './pages/NotFoundPage'
+
+// Экраны зала — отдельным чанком. Машина у проектора грузит только табло, а не
+// весь код организатора: на слабом ноутбуке и гостевом Wi-Fi это разница между
+// «открылось к первому бою» и «открывается».
+const DisplayMatchPage = lazy(() => import('./pages/DisplayMatchPage'))
+const DisplayPistePage = lazy(() => import('./pages/DisplayPistePage'))
+const DisplayTournamentPage = lazy(() => import('./pages/DisplayTournamentPage'))
+const DisplayBoardPage = lazy(() => import('./pages/DisplayBoardPage'))
+
+// Заставка на время подгрузки чанка — на чёрном фоне табло, а не на белом
+// листе: иначе экран в зале моргает белым при каждом открытии.
+const BoardLoading = (
+  <div style={{
+    position: 'fixed', inset: 0, background: '#0d0f14', color: '#6b7280',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '3vh',
+  }}>
+    Загрузка…
+  </div>
+)
 
 export default function App() {
   return (
     <BrowserRouter>
+      <Suspense fallback={BoardLoading}>
       <Routes>
         {/* Табло для зала — вне <Layout>: ни шапки, ни навигации (АР-14). */}
         <Route path="display/match/:id" element={<DisplayMatchPage />} />
@@ -40,6 +57,7 @@ export default function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>
+      </Suspense>
     </BrowserRouter>
   )
 }

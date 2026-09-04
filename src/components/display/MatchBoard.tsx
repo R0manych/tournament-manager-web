@@ -39,8 +39,18 @@ export default function MatchBoard({
 }) {
   const { data: match, isLoading, isError, dataUpdatedAt } = useQuery({
     queryKey: ['matches', matchId],
-    queryFn: () => matchesApi.get(matchId),
-    refetchInterval: q => (q.state.data?.status === 'InProgress' ? 2000 : false),
+    queryFn: ({ signal }) => matchesApi.get(matchId, signal),
+    // Опрашивать надо и запланированный бой: табло, открытое до старта
+    // (закреплённая ссылка на финал, docs/09 §6.4), иначе не узнает ни о
+    // старте, ни о счёте — окно на втором мониторе фокус не теряет, и
+    // `refetchOnWindowFocus` его не спасает. Гасим интервал только на
+    // терминальных статусах, где меняться уже нечему.
+    refetchInterval: q => {
+      const s = q.state.data?.status
+      if (s === 'InProgress') return 2000
+      if (s === 'Scheduled') return 5000
+      return false
+    },
     refetchOnWindowFocus: true,
   })
 
@@ -65,7 +75,7 @@ export default function MatchBoard({
   // Серия команды: агрегированный счёт, номер боя, приоритет в tie-break.
   const { data: encounter } = useQuery({
     queryKey: ['encounters', match?.encounterId],
-    queryFn: () => encountersApi.get(match!.encounterId!),
+    queryFn: ({ signal }) => encountersApi.get(match!.encounterId!, signal),
     enabled: !!match?.encounterId,
     refetchInterval: q => (q.state.data?.status === 'InProgress' ? 2000 : false),
   })
@@ -86,7 +96,7 @@ export default function MatchBoard({
   // Выборка сужена площадкой, если она известна — очередь у каждой своя.
   const { data: tournamentMatches } = useQuery({
     queryKey: ['tournament-matches', match?.tournamentId, scopePisteId ?? null],
-    queryFn: () => matchesApi.listByTournament(match!.tournamentId, scopePisteId),
+    queryFn: ({ signal }) => matchesApi.listByTournament(match!.tournamentId, scopePisteId, signal),
     enabled: !!match?.tournamentId && !match?.encounterId,
     refetchInterval: 10_000,
   })
@@ -306,7 +316,7 @@ export function WaitingBoard({
 
   const { data: matches } = useQuery({
     queryKey: ['tournament-matches', tournamentId, piste?.id ?? null],
-    queryFn: () => matchesApi.listByTournament(tournamentId!, piste?.id),
+    queryFn: ({ signal }) => matchesApi.listByTournament(tournamentId!, piste?.id, signal),
     enabled: !!tournamentId,
     refetchInterval: 5000,
   })
@@ -324,6 +334,14 @@ export function WaitingBoard({
   const { data: pistes } = usePistes(tournamentId)
   const hasPistes = (pistes?.length ?? 0) > 0
 
+  // Составы команд — ради имён в «следующей паре»: у боута это бойцы, а не
+  // участники турнира (см. `pairLabel`).
+  const { data: teams } = useQuery({
+    queryKey: ['teams', tournamentId],
+    queryFn: () => teamsApi.listByTournament(tournamentId!),
+    enabled: !!tournamentId && tournament?.participantKind === 'Team',
+  })
+
   // Экран ожидания подчиняется тому же правилу, что и карточка боя: с
   // заведёнными ристалищами очередь принадлежит площадке, и табло без площадки
   // (`/display/tournament/:id`) следующую пару не обещает — она была бы взята
@@ -332,7 +350,11 @@ export function WaitingBoard({
   const next = scoped
     ? orderMatchesForPlay(matches ?? [], format).find(m => m.status === 'Scheduled')
     : undefined
-  const label = next && tournament ? pairLabel(next, tournament) : null
+  const boutNames = new Map<string, string>()
+  for (const t of teams ?? []) {
+    for (const m of t.members) boutNames.set(m.fighterId, `${m.firstName} ${m.lastName}`)
+  }
+  const label = next && tournament ? pairLabel(next, tournament, boutNames) : null
 
   return (
     <Screen>
@@ -532,8 +554,13 @@ function BoutContext({
 
 // ─── Следующая пара ───────────────────────────────────────────────────────────
 
-function pairLabel(match: Match, tournament: Tournament): string {
+function pairLabel(match: Match, tournament: Tournament, boutNames?: Map<string, string>): string {
   const name = (id?: string) => {
+    if (!id) return '?'
+    // Боут: `fighter1Id` — боец из состава команды, а участники командного
+    // турнира — сами команды. Искать его среди `participants` бесполезно:
+    // зал получал буквально «? — ?» между боями серии (8 раз за серию).
+    if (match.encounterId) return boutNames?.get(id) ?? '?'
     const p = tournament.participants.find(x => x.participantId === id)
     return p ? participantName(p) : '?'
   }
@@ -582,7 +609,12 @@ function resolveNextPair(args: {
   const ordered = orderMatchesForPlay(tournamentMatches, format)
   const idx = ordered.findIndex(m => m.id === match.id)
   const next = ordered.slice(idx + 1).find(m => m.status === 'Scheduled')
-  return next ? pairLabel(next, tournament) : null
+  if (!next) return null
+  const rosterNames = new Map<string, string>()
+  for (const t of teams ?? []) {
+    for (const m of t.members) rosterNames.set(m.fighterId, `${m.firstName} ${m.lastName}`)
+  }
+  return pairLabel(next, tournament, rosterNames)
 }
 
 // ─── Стили ────────────────────────────────────────────────────────────────────

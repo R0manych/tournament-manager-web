@@ -205,7 +205,7 @@ export default function MatchPage() {
 
   const { data: match, isLoading } = useQuery({
     queryKey: ['matches', id],
-    queryFn: () => matchesApi.get(id!),
+    queryFn: ({ signal }) => matchesApi.get(id!, signal),
     enabled: !!id,
     refetchOnWindowFocus: true,
     refetchInterval: q => (q.state.data?.status === 'InProgress' ? 5000 : false),
@@ -238,7 +238,7 @@ export default function MatchPage() {
   // Team bout: load the parent encounter for series context (aggregate score, cap).
   const { data: encounter } = useQuery({
     queryKey: ['encounters', match?.encounterId],
-    queryFn: () => encountersApi.get(match!.encounterId!),
+    queryFn: ({ signal }) => encountersApi.get(match!.encounterId!, signal),
     enabled: !!match?.encounterId,
     refetchInterval: q => (q.state.data?.status === 'InProgress' ? 5000 : false),
   })
@@ -519,9 +519,11 @@ export default function MatchPage() {
       matchesApi.updateExchange(exchangeId, data),
     onSuccess: applyUpdated,
   })
+  // Ответ — уже пересчитанная встреча (инвариант 1), а не 204: кладём её в
+  // кэш, как и остальные правки журнала, вместо лишнего рефетча.
   const delExchangeMut = useMutation({
     mutationFn: (eid: string) => matchesApi.deleteExchange(eid),
-    onSuccess: invalidate,
+    onSuccess: applyUpdated,
   })
 
   // Снятие очков. Счёт — производная от сходов (инвариант 1), а отрицательные
@@ -1085,6 +1087,27 @@ export default function MatchPage() {
               Двойное поражение
             </button>
           )}
+          {/* Отмена боя. Единственный способ убрать встречу снявшегося
+              участника, не откатывая турнир в черновик (что снесло бы все
+              встречи). Освобождает ячейку сетки (инвариант 44, ОВ-3), поэтому
+              бой в ней пересоздаётся генерацией раунда без лишних действий. */}
+          {(isScheduled || isInProgress) && (
+            <button
+              onClick={() => {
+                if (!window.confirm(
+                  'Отменить бой? Он останется в списке встреч со статусом «Отменён», ' +
+                  'но освободит своё место в сетке — раунд можно будет сформировать заново. ' +
+                  'Вернуть отменённый бой в работу нельзя.'
+                )) return
+                statusMut.mutate('Cancelled')
+              }}
+              disabled={statusMut.isPending}
+              style={BTN_SECONDARY}
+              title="Бой не состоится: участник снялся, пара заведена по ошибке"
+            >
+              ✕ Отменить бой
+            </button>
+          )}
           {(isCompleted || isDoubleLoss) && (
             <button
               onClick={() => statusMut.mutate('InProgress')}
@@ -1109,6 +1132,9 @@ export default function MatchPage() {
             <button onClick={() => warnMut.mutate({ f1d: -1 })} disabled={warnMut.isPending || match.warnings1 === 0} style={SIDE_BTN1}>⚠− {short1}</button>
             <button onClick={() => warnMut.mutate({ f2d: 1 })} disabled={warnMut.isPending} style={SIDE_BTN2}>⚠+ {short2}</button>
             <button onClick={() => warnMut.mutate({ f2d: -1 })} disabled={warnMut.isPending || match.warnings2 === 0} style={SIDE_BTN2}>⚠− {short2}</button>
+            {warnMut.isError && (
+              <span style={{ color: 'var(--c-danger)', fontSize: '0.85em' }}>Ошибка</span>
+            )}
           </div>
 
           {/* Видеоповторы. Отдельным рядом от предупреждений: это не санкция, а
@@ -1119,6 +1145,9 @@ export default function MatchPage() {
             <button onClick={() => replayMut.mutate({ f1d: -1 })} disabled={replayMut.isPending || match.videoReplays1 === 0} style={SIDE_BTN1}>🎥− {short1}</button>
             <button onClick={() => replayMut.mutate({ f2d: 1 })} disabled={replayMut.isPending} style={SIDE_BTN2}>🎥+ {short2}</button>
             <button onClick={() => replayMut.mutate({ f2d: -1 })} disabled={replayMut.isPending || match.videoReplays2 === 0} style={SIDE_BTN2}>🎥− {short2}</button>
+            {replayMut.isError && (
+              <span style={{ color: 'var(--c-danger)', fontSize: '0.85em' }}>Ошибка</span>
+            )}
           </div>
 
           {/* Quick score */}

@@ -1,10 +1,35 @@
 import { useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { tournamentsApi } from '../api/tournaments'
+import { apiErrorMessage, isApiError } from '../api/client'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
 import TournamentBracketView from './bracket/TournamentBracketView'
 import type { Encounter, Match, MatchPlacement, TournamentParticipant, TournamentStatus } from '../api/types'
 import { TOURNAMENT_STATUS_LABELS } from '../api/types'
+
+/** Одна ошибка валидации формата: `FormatError(Path, Code, Message)` с сервера. */
+interface FormatIssue {
+  path: string
+  code?: string
+  message: string
+}
+
+// Тело `problem.errors` приходит как есть с сервера — разбираем защитно:
+// неожиданная форма не должна прятать само сообщение об ошибке.
+function formatIssues(raw: unknown): FormatIssue[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((e): FormatIssue[] => {
+    if (typeof e !== 'object' || e === null) return []
+    const o = e as Record<string, unknown>
+    const message = typeof o.message === 'string' ? o.message : null
+    if (!message) return []
+    return [{
+      path: typeof o.path === 'string' && o.path ? o.path : '(корень)',
+      code: typeof o.code === 'string' ? o.code : undefined,
+      message,
+    }]
+  })
+}
 
 // Which forced write the organiser is being asked to confirm (B-2).
 type ForcedWrite = 'replace' | 'delete'
@@ -30,6 +55,10 @@ export default function TournamentFormatSection({
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  // Ошибки валидации YAML по одной строке. Сервер кладёт их в `problem.errors`
+  // и **не** заполняет `detail`, поэтому раньше организатор на любом кривом
+  // файле видел ровно «Tournament format is invalid» — без строки, поля и кода.
+  const [formatErrors, setFormatErrors] = useState<FormatIssue[]>([])
   const [showBracket, setShowBracket] = useState(true)
 
   // The server freezes the format outside Draft (TournamentSetupGuard) and only
@@ -73,28 +102,33 @@ export default function TournamentFormatSection({
     setClearedNote(parts.length > 0 ? `Удалено — ${parts.join('; ')}.` : null)
   }
 
-  const problemMessage = (err: unknown, fallback: string) => {
-    const e = err as { problem?: { detail?: string; title?: string } }
-    return e?.problem?.detail ?? e?.problem?.title ?? fallback
+  const showError = (err: unknown, fallback: string) => {
+    setUploadError(apiErrorMessage(err, fallback))
+    setFormatErrors(isApiError(err) ? formatIssues(err.problem.errors) : [])
+  }
+
+  const clearErrors = () => {
+    setUploadError(null)
+    setFormatErrors([])
   }
 
   const uploadMutation = useMutation({
     mutationFn: ({ file, force }: { file: File; force: boolean }) =>
       tournamentsApi.format.upload(tournamentId, file, force),
     onSuccess: (res) => {
-      setUploadError(null)
+      clearErrors()
       afterFormatWrite(res.groupsCleared, res.placementsCleared)
     },
-    onError: (err: unknown) => setUploadError(problemMessage(err, 'Ошибка загрузки')),
+    onError: (err: unknown) => showError(err, 'Ошибка загрузки'),
   })
 
   const deleteMutation = useMutation({
     mutationFn: (force: boolean) => tournamentsApi.format.delete(tournamentId, force),
     onSuccess: (res) => {
-      setUploadError(null)
+      clearErrors()
       afterFormatWrite(res.groupsCleared, res.placementsCleared)
     },
-    onError: (err: unknown) => setUploadError(problemMessage(err, 'Ошибка удаления формата')),
+    onError: (err: unknown) => showError(err, 'Ошибка удаления формата'),
   })
 
   const [downloading, setDownloading] = useState(false)
@@ -113,7 +147,7 @@ export default function TournamentFormatSection({
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
-    setUploadError(null)
+    clearErrors()
     setClearedNote(null)
     if (isDraft) uploadMutation.mutate({ file, force: false })
     else {
@@ -123,7 +157,7 @@ export default function TournamentFormatSection({
   }
 
   const handleDeleteClick = () => {
-    setUploadError(null)
+    clearErrors()
     setClearedNote(null)
     if (isDraft) deleteMutation.mutate(false)
     else setPendingForce('delete')
@@ -234,7 +268,24 @@ export default function TournamentFormatSection({
         </div>
       )}
 
-      {uploadError && <p style={{ color: '#cc0000', marginTop: 8 }} role="alert">{uploadError}</p>}
+      {uploadError && (
+        <div style={{ marginTop: 8 }} role="alert">
+          <p style={{ color: '#cc0000', margin: 0 }}>{uploadError}</p>
+          {/* Разбор ошибок парсера: без него «формат невалиден» не подсказывает,
+              что именно править в файле. Путь — адрес узла в YAML. */}
+          {formatErrors.length > 0 && (
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18, color: '#a33', fontSize: 13 }}>
+              {formatErrors.map((issue, i) => (
+                <li key={i} style={{ marginBottom: 2 }}>
+                  <code style={{ color: '#803' }}>{issue.path}</code>
+                  {' — '}{issue.message}
+                  {issue.code && <span style={{ color: '#b88' }}> [{issue.code}]</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {clearedNote && <p style={{ color: '#8a6d00', marginTop: 8 }} role="status">{clearedNote}</p>}
 
       <input

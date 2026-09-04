@@ -1,4 +1,4 @@
-import type { TournamentFormat, TournamentParticipant, Match, Encounter, MatchPlacement, MatchPlacementRef } from '../../api/types'
+import type { TournamentFormat, TournamentParticipant, Match, MatchStatus, Encounter, MatchPlacement, MatchPlacementRef } from '../../api/types'
 import { participantName } from '../../api/types'
 import type { TournamentGroup } from '../../api/groups'
 
@@ -25,6 +25,7 @@ export interface PlaceableMatch {
   id: string
   fighter1Id: string
   fighter2Id?: string
+  status?: MatchStatus
 }
 
 export interface PhaseCellLookup<M> {
@@ -59,9 +60,16 @@ export function createCellLookup<M extends PlaceableMatch>(
 
   const at = (roundId: string, slotIndex: number) => cells.get(cellKey(roundId, slotIndex))
 
+  // Отменённая встреча из фолбэка исключена. Сервер при отмене **удаляет**
+  // размещение, чтобы организатор пересоздал бой в освободившейся ячейке
+  // (инвариант 44, ОВ-3) — то есть отменённая встреча становится
+  // «неразмещённой» и без этого фильтра снова подхватывалась бы сюда: ячейка
+  // считалась бы занятой, новая встреча не создавалась, а генерация раунда
+  // упиралась в «ещё N незавершённых боёв» уже навсегда.
   const byPair = (f1: string, f2: string) =>
     all.find(m =>
       !placedIds.has(m.id) &&
+      m.status !== 'Cancelled' &&
       ((m.fighter1Id === f1 && m.fighter2Id === f2) ||
        (m.fighter1Id === f2 && m.fighter2Id === f1)),
     )
@@ -238,6 +246,10 @@ export interface OrderableMatch {
   fighter1Id: string
   fighter2Id?: string
   placement?: MatchPlacementRef
+  // Боут серии: размещения у него нет (B-8), а `createdAt` у всех девяти
+  // одинаков — их порядок задаёт только номер по схеме FIE.
+  encounterId?: string
+  boutNumber?: number
 }
 
 // Ключ раунда — тот же JSON, что и у ячейки: метка группы это свободный текст.
@@ -361,6 +373,15 @@ export function orderMatchesForPlay<T extends OrderableMatch & { scheduledAt?: s
   const order = buildBoutOrder(matches)
   return [...matches]
     .sort((a, b) => (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt))
+    // Боуты одной серии: строго по номеру. Ни размещения, ни времени, которые
+    // развели бы их, у них нет — `generate-bouts` ставит всем девяти один и
+    // тот же `CreatedAt`, поэтому без этой ступени порядок задавала выдача
+    // Postgres и менялась после каждого UPDATE: зал обещал «следующий боут 7»,
+    // когда судья вызывал четвёртый.
+    .sort((a, b) =>
+      a.encounterId != null && a.encounterId === b.encounterId
+        ? (a.boutNumber ?? 0) - (b.boutNumber ?? 0)
+        : 0)
     .sort((a, b) => compareBoutOrder(a, b, format, order))
 }
 
@@ -383,7 +404,9 @@ export function describePlacement(
 export interface GroupAssignment {
   groupIndex: number
   groupLabel: string
-  participants: Array<{ fighterId: string; seed: number; name: string }>
+  // `seed` необязателен: у участника его может не быть вовсе, и подставлять
+  // вместо него порядковый номер — значит показать выдуманный посев.
+  participants: Array<{ fighterId: string; seed?: number; name: string }>
 }
 
 export interface BracketSlot {
@@ -502,6 +525,10 @@ export function resolveDEFromCache(
 
 // ── Snake seeding ──────────────────────────────────────────────────────────
 // seed 1→A, 2→B, 3→C, 4→D, 5→D, 6→C, 7→B, 8→A, 9→A, ...
+// Участники без посева идут после посеянных, в исходном порядке.
+const bySeed = (a: { seed?: number }, b: { seed?: number }) =>
+  (a.seed ?? Number.MAX_SAFE_INTEGER) - (b.seed ?? Number.MAX_SAFE_INTEGER)
+
 export function assignGroups(
   phase: TournamentFormat['phases'][0] & { type: 'roundRobin' },
   participants: TournamentParticipant[],
@@ -513,7 +540,7 @@ export function assignGroups(
     participants: [],
   }))
 
-  const sorted = [...participants].sort((a, b) => (a.seed ?? 999) - (b.seed ?? 999))
+  const sorted = [...participants].sort(bySeed)
 
   sorted.forEach((p, idx) => {
     const row = Math.floor(idx / groupCount)
@@ -593,12 +620,15 @@ export function savedGroupsDrift(
   const savedIds = new Set(phaseGroups.flatMap(g => g.participantIds))
   const registeredIds = new Set(participants.map(p => p.participantId))
 
+  // Посев не подставляем: нумерация внутри пула начиналась бы заново, и
+  // дозаявленный без посева показывался бы как «#1» рядом с настоящим первым
+  // номером в группе.
   const unassigned = participants
     .filter(p => !savedIds.has(p.participantId))
-    .sort((a, b) => (a.seed ?? 999) - (b.seed ?? 999))
-    .map((p, idx) => ({
+    .sort(bySeed)
+    .map(p => ({
       fighterId: p.participantId,
-      seed: p.seed ?? idx + 1,
+      seed: p.seed,
       name: participantName(p),
     }))
 
@@ -608,9 +638,34 @@ export function savedGroupsDrift(
   return { unassigned, withdrawnCount }
 }
 
+/**
+ * Состав групп **исходной** фазы для генератора плейофф.
+ *
+ * Единственная точка входа для генераторов: `resolvePhaseGroups` подходит
+ * только snake-фазам, а на фазе с явным посевом (`seeding.groups`) молча
+ * раскладывала бы змейкой **всех** участников турнира — «группы» получались
+ * выдуманные, и в сетку по их «первым местам» попадали уже выбывшие. Здесь
+ * такая фаза резолвится из таблиц предыдущих, ровно как при отрисовке.
+ */
+export function resolveSourcePhaseGroups(
+  format: TournamentFormat,
+  phaseId: string,
+  participants: TournamentParticipant[],
+  standingsSource: StandingsMatch[] | undefined,
+  placements: MatchPlacement[] | undefined,
+  savedGroups: TournamentGroup[] | undefined,
+): GroupAssignment[] {
+  const cached = buildPhaseStandingsCache(
+    format, participants, standingsSource, placements, savedGroups,
+  ).get(phaseId)
+  if (!cached) throw new Error(`Фаза '${phaseId}' не найдена среди групповых фаз формата.`)
+  return cached.assignments
+}
+
 // Saved composition wins; otherwise snake seeding. Explicit-seeded phases
 // (phase.seeding.groups) are resolved from standings elsewhere and are not
-// persisted.
+// persisted — генераторы обязаны звать `resolveSourcePhaseGroups`, а не эту
+// функцию напрямую.
 export function resolvePhaseGroups(
   phase: TournamentFormat['phases'][0] & { type: 'roundRobin' },
   participants: TournamentParticipant[],
@@ -723,7 +778,7 @@ export function assignGroupsFromExplicitSeeding(
 // Standings are computed by reusing calculateGroupStandings (swiss phases carry
 // both `pointsPerMatch` and `tieBreakers`).
 export function buildSwissPool(participants: TournamentParticipant[]): GroupAssignment {
-  const sorted = [...participants].sort((a, b) => (a.seed ?? 999) - (b.seed ?? 999))
+  const sorted = [...participants].sort(bySeed)
   return {
     groupIndex: 0,
     groupLabel: 'A',
@@ -753,6 +808,8 @@ export interface SwissPairingPhase {
     firstRound?: 'fold' | 'adjacent' | 'random'
     avoidRematch?: boolean
     byePolicy?: ByePolicy
+    /** Что засчитывается получателю байа (спека §4.9). По умолчанию `win`. */
+    byeResult?: 'win' | 'draw'
   }
 }
 
@@ -826,24 +883,51 @@ export function planSwissNextRound(
 
   const idSet = new Set(ids)
   // Pool matches: both fighters in the pool, or a bye whose single fighter is.
+  // Отменённая встреча не сыграна: ни в счёт туров, ни в «эта пара уже была».
   const swissMatches = allMatches.filter(m =>
+    m.status !== 'Cancelled' &&
     idSet.has(m.fighter1Id) && (isByeMatch(m) || idSet.has(m.fighter2Id!))
   )
   // A round is "incomplete" only while a real match still awaits a result.
   // Byes are created already resolved (WalkoverWin) and never block.
-  const incomplete = swissMatches.filter(m => m.status === 'Scheduled' || m.status === 'InProgress').length
+  //
+  // Считаем по ВСЕМ встречам фазы, а не только по встречам текущего пула:
+  // незавершённый бой участника, которого успели снять, из пула выпадает — и
+  // тур считался бы доигранным, хотя на дорожке ещё идёт бой.
+  const incomplete = allMatches.filter(
+    m => m.status === 'Scheduled' || m.status === 'InProgress'
+  ).length
   if (incomplete > 0) {
     throw new Error(`В текущем туре ещё ${incomplete} незавершённых боёв. Завершите их, чтобы сформировать следующий тур.`)
   }
 
-  // Rounds played = games each fighter has had (equal across the pool in a clean
-  // swiss; byes count as a game). Use the minimum to avoid over-advancing.
-  const games = new Map<string, number>(ids.map(x => [x, 0]))
-  for (const m of swissMatches) {
-    games.set(m.fighter1Id, (games.get(m.fighter1Id) ?? 0) + 1)
-    if (m.fighter2Id && idSet.has(m.fighter2Id)) games.set(m.fighter2Id, (games.get(m.fighter2Id) ?? 0) + 1)
+  // Сколько туров уже сыграно. Считаем по номерам занятых ячеек `round{N}`
+  // (docs/08 §6) — это свойство фазы, а не текущего состава.
+  //
+  // Раньше здесь стоял `min(games)` по живому пулу, и любая правка состава
+  // отбрасывала швейцарку назад: снялся участник после второго тура — у двух
+  // его соперников игр становилось на одну меньше, планировался уже сыгранный
+  // тур, все ячейки `round2#*` оказывались заняты, и генерация падала с 409,
+  // успев создать часть встреч. Дозаявка ломала зеркально (`games = 0` → «тур 1»).
+  //
+  // `min(games)` остаётся запасным путём для турниров без размещений
+  // (инвариант 46) — там ячеек нет и считать больше не по чему.
+  const placedRounds = allMatches
+    .map(m => m.placement?.roundId)
+    .filter((r): r is string => typeof r === 'string' && /^round[0-9]+$/.test(r))
+    .map(r => Number(r.slice('round'.length)))
+
+  let roundsPlayed: number
+  if (placedRounds.length > 0) {
+    roundsPlayed = Math.max(...placedRounds)
+  } else {
+    const games = new Map<string, number>(ids.map(x => [x, 0]))
+    for (const m of swissMatches) {
+      games.set(m.fighter1Id, (games.get(m.fighter1Id) ?? 0) + 1)
+      if (m.fighter2Id && idSet.has(m.fighter2Id)) games.set(m.fighter2Id, (games.get(m.fighter2Id) ?? 0) + 1)
+    }
+    roundsPlayed = Math.min(...games.values())
   }
-  const roundsPlayed = Math.min(...games.values())
   if (phase.rounds != null && roundsPlayed >= phase.rounds) {
     throw new Error('Все туры швейцарки уже сыграны.')
   }
@@ -1051,8 +1135,18 @@ export interface GrandFinalSeries<M> {
 
 type DecidableMatch = PlaceableMatch & Pick<Match, 'status' | 'winnerId'>
 
-const decidedWinner = (m: DecidableMatch | undefined): string | null =>
+/**
+ * Бой закончен и дал победителя. Тех. победа (бай) — такой же результат, как
+ * обычная победа: она создаётся сразу решённой и следующий раунд не блокирует.
+ * Двойного поражения здесь нет намеренно — бой закончен, но победителя не дал
+ * (АР-16), и дальше по сетке из него не идёт никто.
+ */
+export const decidedWinner = (m: DecidableMatch | undefined): string | null =>
   m && (m.status === 'Completed' || m.status === 'WalkoverWin') ? m.winnerId ?? null : null
+
+/** Бой доигран в любом смысле: победа, тех. победа или двойное поражение. */
+export const isFinishedMatch = (m: { status?: MatchStatus } | undefined): boolean =>
+  m?.status === 'Completed' || m?.status === 'WalkoverWin' || m?.status === 'DoubleLoss'
 
 export function resolveGrandFinalSeries<M extends DecidableMatch>(
   mode: GrandFinalMode,
@@ -1281,6 +1375,9 @@ export function calculateGroupStandings(
   const p = rrPhase as any
   const ppm = p.pointsPerMatch as { win: number; draw: number; loss: number }
   const tieBreakers: string[] = p.tieBreakers ?? ['random']
+  // Только у швейцарки: в roundRobin баев нет, там неполная группа — это
+  // просто меньше встреч.
+  const byeResult: 'win' | 'draw' = p.pairing?.byeResult === 'draw' ? 'draw' : 'win'
 
   return groupAssignments.map(group => {
     const ids = new Set(group.participants.map(x => x.fighterId))
@@ -1290,13 +1387,21 @@ export function calculateGroupStandings(
     }
 
     for (const match of allMatches) {
-      // Bye / walkover (no opponent): a win for fighter1, score difference untouched.
+      // Bye / walkover (no opponent): результат байа задаёт формат
+      // (`pairing.byeResult`, спека §4.9: win | draw, по умолчанию win).
+      // Раньше бай всегда шёл в победу — файл с `byeResult: draw` парсер
+      // принимал, а таблица считала по-своему. Разница ударов не трогается.
       if (match.fighter2Id == null) {
         if (match.status !== 'WalkoverWin' && match.status !== 'Completed') continue
         if (!ids.has(match.fighter1Id)) continue
         const sb = map.get(match.fighter1Id)!
-        sb.points += ppm.win
-        sb.wins++
+        if (byeResult === 'draw') {
+          sb.points += ppm.draw
+          sb.draws++
+        } else {
+          sb.points += ppm.win
+          sb.wins++
+        }
         continue
       }
 
@@ -1364,6 +1469,35 @@ export function resolvePlayoffSlots(
     const groupIdx = parts[1].charCodeAt(0) - 65  // 'A' → 0, 'B' → 1, …
     return groupStandings[groupIdx]?.[slot.rank - 1]?.fighterId ?? null
   })
+}
+
+/**
+ * Слоты одного раунда нижней сетки: то, что пришло по самой LB (прямые слоты в
+ * первом раунде, победители предыдущего — дальше), плюс выбывшие из раунда UB,
+ * указанного в `dropdownsFrom`.
+ *
+ * Первый раунд LB раньше собирался **только** из прямых слотов, а дропауты
+ * начинались со второго. В хрестоматийном DE, где все стартуют в верхней сетке
+ * и LB-R1 целиком составлен из проигравших UB-R1, прямых слотов нет вовсе —
+ * нижняя сетка не резолвилась ни на экране, ни в генераторе («Нет встреч для
+ * генерации»).
+ *
+ * Списки разной длины больше не обрезаются по короткому: лишние дропауты
+ * раньше молча исчезали (валидатор LB, в отличие от UB, равенства не требует).
+ */
+export function lbRoundSlots(
+  carried: (string | null)[],
+  dropouts: (string | null)[] | null,
+): (string | null)[] {
+  if (!dropouts) return [...carried]
+  if (carried.length === 0) return [...dropouts]
+  const out: (string | null)[] = []
+  const n = Math.max(carried.length, dropouts.length)
+  for (let i = 0; i < n; i++) {
+    if (i < carried.length) out.push(carried[i])
+    if (i < dropouts.length) out.push(dropouts[i])
+  }
+  return out
 }
 
 export function resolveDERoundPairs(
@@ -1440,35 +1574,33 @@ export function resolveDERoundPairs(
     }
   }
 
+  // Выбывшие из раунда UB, на который ссылается `dropdownsFrom` раунда LB.
+  const dropoutsFor = (lbRi: number): (string | null)[] | null => {
+    const from = lbRounds[lbRi]?.dropdownsFrom
+    if (!from) return null
+    const ubRi = ubRounds.findIndex(r => r.id === from)
+    if (ubRi < 0 || !ubPairs[ubRi]) return null
+    return ubPairs[ubRi].map(([f1, f2], i) =>
+      (f1 && f2) ? matchLoser(ubRounds[ubRi].id, i, f1, f2) : null)
+  }
+
+  const toPairs = (slots: (string | null)[]): Pair[] => {
+    const pairs: Pair[] = []
+    for (let i = 0; i + 1 < slots.length; i += 2) pairs.push([slots[i], slots[i + 1]])
+    return pairs
+  }
+
   const lbPairs: Pair[][] = []
   {
-    const r0: Pair[] = []
-    for (let i = 0; i + 1 < lbDirectSlots.length; i += 2)
-      r0.push([lbDirectSlots[i], lbDirectSlots[i + 1]])
+    // Первый раунд LB: прямые слоты и/или выбывшие из указанного раунда UB.
+    const r0 = toPairs(lbRoundSlots(lbDirectSlots, dropoutsFor(0)))
     // Only resolve names if LB first-round matches actually exist in the DB
     if (lbRounds.length > 0 && hasRoundMatches(r0, lbRounds[0].id)) {
       lbPairs.push(r0)
       for (let ri = 1; ri < lbRounds.length; ri++) {
-        const round = lbRounds[ri]
         const prevWinners = lbPairs[ri - 1].map(([f1, f2], i) =>
           (f1 && f2) ? matchWinner(lbRounds[ri - 1].id, i, f1, f2) : null)
-        let slotsForRound: (string | null)[] = [...prevWinners]
-        if (round.dropdownsFrom) {
-          const ubRi = ubRounds.findIndex(r => r.id === round.dropdownsFrom)
-          if (ubRi >= 0 && ubPairs[ubRi]) {
-            const losers = ubPairs[ubRi].map(([f1, f2], i) =>
-              (f1 && f2) ? matchLoser(ubRounds[ubRi].id, i, f1, f2) : null)
-            slotsForRound = []
-            for (let i = 0; i < prevWinners.length; i++) {
-              slotsForRound.push(prevWinners[i])
-              slotsForRound.push(losers[i] ?? null)
-            }
-          }
-        }
-        const pairs: Pair[] = []
-        for (let i = 0; i + 1 < slotsForRound.length; i += 2)
-          pairs.push([slotsForRound[i], slotsForRound[i + 1]])
-        lbPairs.push(pairs)
+        lbPairs.push(toPairs(lbRoundSlots(prevWinners, dropoutsFor(ri))))
       }
     }
   }

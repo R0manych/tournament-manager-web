@@ -63,16 +63,26 @@ export default function SwissPhaseView({ name, phase, pool, standings }: Props) 
   const hasStats = standingMap !== null
 
   // Order rows by standing when available, otherwise by seed.
-  const rows = standingMap
+  // Ключ строки — id участника, а не имя: двое однофамильцев с одинаковым
+  // именем давали React дублирующийся ключ, и строки прыгали при
+  // переупорядочивании таблицы после каждого тура.
+  const rows: Array<{
+    id: string
+    rank: number
+    name: string
+    seed?: number
+    standing: GroupStanding | null
+  }> = standingMap
     ? standings!.map((s, rank) => {
         const p = pool.participants.find(x => x.fighterId === s.fighterId)
-        return { rank: rank + 1, name: p?.name ?? s.fighterId, seed: p?.seed, standing: s }
+        return { id: s.fighterId, rank: rank + 1, name: p?.name ?? s.fighterId, seed: p?.seed, standing: s }
       })
     : pool.participants.map((p, i) => ({
+        id: p.fighterId,
         rank: i + 1,
         name: p.name,
         seed: p.seed,
-        standing: null as GroupStanding | null,
+        standing: null,
       }))
 
   const ppm = phase.pointsPerMatch
@@ -122,7 +132,7 @@ export default function SwissPhaseView({ name, phase, pool, standings }: Props) 
             </thead>
             <tbody>
               {rows.map(row => (
-                <tr key={row.name}>
+                <tr key={row.id}>
                   <td style={TD_NUM}>{row.rank}</td>
                   <td style={{ ...TD, color: '#1a1a1a' }}>
                     {row.name}

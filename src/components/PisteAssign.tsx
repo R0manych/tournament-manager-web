@@ -47,7 +47,6 @@ export default function PisteAssign({
       // площадки в строках; боуты серии наследуют её, поэтому обновляем и их.
       qc.invalidateQueries({ queryKey: ['pistes', t] })
       qc.invalidateQueries({ queryKey: ['tournament-matches', t] })
-      qc.invalidateQueries({ queryKey: ['matches', t] })
       if (target.kind === 'match') {
         qc.invalidateQueries({ queryKey: ['matches', target.match.id] })
       } else {

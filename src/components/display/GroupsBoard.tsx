@@ -114,6 +114,9 @@ function GroupCard({
               <tr style={{ color: '#4b5265', fontSize: '0.75em' }}>
                 <th style={{ ...TH, textAlign: 'left' }} />
                 <th style={TH}>В</th>
+                {/* Ничьи считаются и входят в очки: без этой колонки боец с
+                    двумя ничьими читался в зале как «0 / 0 / 2». */}
+                <th style={TH}>Н</th>
                 <th style={TH}>П</th>
                 <th style={TH}>Оч</th>
               </tr>
@@ -129,6 +132,7 @@ function GroupCard({
                 {row.standing && (
                   <>
                     <td style={{ ...TD, ...NUM }}>{row.standing.wins}</td>
+                    <td style={{ ...TD, ...NUM }}>{row.standing.draws}</td>
                     <td style={{ ...TD, ...NUM }}>{row.standing.losses}</td>
                     <td style={{ ...TD, ...NUM, fontWeight: 800 }}>{row.standing.points}</td>
                   </>

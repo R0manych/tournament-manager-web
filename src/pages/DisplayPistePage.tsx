@@ -30,7 +30,7 @@ export default function DisplayPistePage() {
   // следующий»; поллинг здесь заменяет сокет (ADR-001 в силе).
   const { data: piste, isError } = useQuery({
     queryKey: ['piste', pisteId],
-    queryFn: () => pistesApi.get(pisteId!),
+    queryFn: ({ signal }) => pistesApi.get(pisteId!, signal),
     enabled: !!pisteId,
     refetchInterval: 3000,
   })
@@ -39,7 +39,7 @@ export default function DisplayPistePage() {
 
   const { data: matches } = useQuery({
     queryKey: ['tournament-matches', tournamentId, pisteId ?? null],
-    queryFn: () => matchesApi.listByTournament(tournamentId!, pisteId),
+    queryFn: ({ signal }) => matchesApi.listByTournament(tournamentId!, pisteId, signal),
     enabled: !!tournamentId && !!pisteId,
     refetchInterval: 3000,
   })

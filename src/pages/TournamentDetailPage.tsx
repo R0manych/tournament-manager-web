@@ -15,9 +15,10 @@ import PistesSection from '../components/PistesSection'
 import { groupsApi, type SaveGroupItem } from '../api/groups'
 import { isProduction } from '../lib/env'
 import {
-  buildSwissPool, calculateGroupStandings, createCellLookup, encountersToStandingsMatches,
-  grandFinalHint, matchesOfPhase, placementsOf, planSwissNextRound, resolveGrandFinalSeries,
-  resolvePhaseGroups, resolvePlayoffSlots, seRounds,
+  buildSwissPool, calculateGroupStandings, createCellLookup, decidedWinner,
+  encountersToStandingsMatches, grandFinalHint, isFinishedMatch, matchesOfPhase, placementsOf,
+  lbRoundSlots, planSwissNextRound, resolveGrandFinalSeries,
+  resolveSourcePhaseGroups, resolvePlayoffSlots, seRounds,
   GRAND_FINAL_RESET_ROUND_ID, GRAND_FINAL_ROUND_ID, THIRD_PLACE_ROUND_ID,
 } from '../components/bracket/bracketUtils'
 
@@ -158,7 +159,13 @@ export default function TournamentDetailPage() {
 
   const removeParticipantMut = useMutation({
     mutationFn: (fighterId: string) => tournamentsApi.removeParticipant(id!, fighterId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tournaments', id] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tournaments', id] })
+      // Состав сохранённых групп сервер при снятии не чистит — расхождение
+      // считает `savedGroupsDrift`, и панель групп обязана его перечитать.
+      qc.invalidateQueries({ queryKey: ['tournament-groups', id] })
+    },
+    onError: (err: unknown) => alert(generationError(err, 'Не удалось снять участника')),
   })
 
   // Single group-panel action: persist the composition dragged together in the
@@ -231,8 +238,9 @@ export default function TournamentDetailPage() {
       const p = sePhase as any
       const fromPhaseId: string = p.seeding?.from
       const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)!
-      const groupAssignments = resolvePhaseGroups(rrPhase as any, tournament!.participants, savedGroups)
       const allTournamentMatches = tournamentMatches ?? []
+      const groupAssignments = resolveSourcePhaseGroups(
+        format!, rrPhase.id, tournament!.participants, allTournamentMatches, placements, savedGroups)
       // Таблица группы считается только по встречам, размещённым в групповой
       // фазе: переигровка одногруппников в плейофф не должна двигать посев
       // задним числом (Д-3).
@@ -251,8 +259,8 @@ export default function TournamentDetailPage() {
 
       const has3rdPlace: boolean = !!p.thirdPlaceMatch
       const loserOf = (m: Match | undefined): string | null => {
-        if (!m?.winnerId) return null
-        return (m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id) ?? null
+        if (!decidedWinner(m)) return null
+        return (m!.fighter1Id === m!.winnerId ? m!.fighter2Id : m!.fighter1Id) ?? null
       }
 
       // Walk rounds until we find the next one to generate
@@ -309,9 +317,10 @@ export default function TournamentDetailPage() {
         // Двойное поражение — завершённый бой (АР-16), в «незавершённые» не идёт.
         // Победителя из него нет, поэтому генерация упирается ниже — с указанием
         // конкретной ячейки, а не общим «проверьте результаты».
-        const incomplete = pairMatches.filter(
-          m => m && m.status !== 'Completed' && m.status !== 'DoubleLoss'
-        ).length
+        // Тех. победа (бай) — законченный бой с победителем: она создаётся уже
+        // решённой и следующий раунд не задерживает. Раньше `WalkoverWin`
+        // считался незавершённым, и сетка с баем не двигалась вовсе.
+        const incomplete = pairMatches.filter(m => m && !isFinishedMatch(m)).length
         if (incomplete > 0) {
           throw new Error(`В текущем раунде плейофф ещё ${incomplete} незавершённых боёв. Завершите их, чтобы сформировать следующий раунд.`)
         }
@@ -331,7 +340,7 @@ export default function TournamentDetailPage() {
             const [l1, l2] = semiFinalLosers()
             if (l1 && l2) {
               const thirdMatch = lookup.find(THIRD_PLACE_ROUND_ID, 0, l1, l2)
-              if (thirdMatch && thirdMatch.status !== 'Completed') {
+              if (thirdMatch && !isFinishedMatch(thirdMatch)) {
                 throw new Error('Финал завершён, но матч за 3-е место ещё не сыгран.')
               }
             }
@@ -340,7 +349,7 @@ export default function TournamentDetailPage() {
         }
 
         // Advance to next round with winners
-        const winners = pairMatches.map(m => m!.winnerId)
+        const winners = pairMatches.map(m => decidedWinner(m))
         if (winners.some(w => !w)) {
           throw new Error('Некоторые бои завершены без победителя. Проверьте результаты.')
         }
@@ -373,10 +382,11 @@ export default function TournamentDetailPage() {
       const p = sePhase as any
       const fromPhaseId: string = p.seeding?.from
       const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)!
-      const groupAssignments = resolvePhaseGroups(rrPhase as any, tournament!.participants, savedGroups)
-
       const encs = await encountersApi.listByTournament(id!)
-      const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, encountersToStandingsMatches(encs))
+      const encStandingsSource = encountersToStandingsMatches(encs)
+      const groupAssignments = resolveSourcePhaseGroups(
+        format!, rrPhase.id, tournament!.participants, encStandingsSource, placements, savedGroups)
+      const groupStandings = calculateGroupStandings(rrPhase, groupAssignments, encStandingsSource)
       const slots = resolvePlayoffSlots(sePhase, groupStandings)
 
       if (slots.some(s => s === null)) {
@@ -489,8 +499,9 @@ export default function TournamentDetailPage() {
       const rrPhase = format!.phases.find(ph => ph.id === fromPhaseId)
       if (!rrPhase) throw new Error(`Фаза '${fromPhaseId}' не найдена.`)
 
-      const groupAssignments = resolvePhaseGroups(rrPhase as any, tournament!.participants, savedGroups)
       const allTMs = tournamentMatches ?? []
+      const groupAssignments = resolveSourcePhaseGroups(
+        format!, rrPhase.id, tournament!.participants, allTMs, placements, savedGroups)
       const groupStandings = calculateGroupStandings(
         rrPhase, groupAssignments, matchesOfPhase(rrPhase.id, allTMs, placements))
 
@@ -505,13 +516,11 @@ export default function TournamentDetailPage() {
       // и матч-сброс — это вообще одна пара подряд. Поэтому встреча ищется строго
       // по ячейке `(фаза, раунд, слот)`; пара осталась подписью (B-5).
       const lookup = createCellLookup(phaseId, allTMs, placements)
-      const matchWinner = (roundId: string, slot: number, f1: string, f2: string): string | null => {
-        const m = lookup.find(roundId, slot, f1, f2)
-        return m?.status === 'Completed' && m.winnerId ? m.winnerId : null
-      }
+      const matchWinner = (roundId: string, slot: number, f1: string, f2: string): string | null =>
+        decidedWinner(lookup.find(roundId, slot, f1, f2))
       const matchLoser = (roundId: string, slot: number, f1: string, f2: string): string | null => {
         const m = lookup.find(roundId, slot, f1, f2)
-        if (m?.status === 'Completed' && m.winnerId)
+        if (m && decidedWinner(m))
           return (m.fighter1Id === m.winnerId ? m.fighter2Id : m.fighter1Id) ?? null
         return null
       }
@@ -551,50 +560,42 @@ export default function TournamentDetailPage() {
         }
       }
 
-      // Pre-compute LB round pairs
+      // Pre-compute LB round pairs. Раскладка слотов раунда общая с отрисовкой
+      // (`lbRoundSlots`): иначе сетка рисует одно, а генератор создаёт другое.
+      const dropoutsFor = (lbRi: number): (string | null)[] | null => {
+        const from = lbRounds[lbRi]?.dropdownsFrom
+        if (!from) return null
+        const ubRi = ubRounds.findIndex(r => r.id === from)
+        if (ubRi < 0 || !ubRoundPairs[ubRi]) return null
+        return ubRoundPairs[ubRi].map(([f1, f2], i) =>
+          (f1 && f2) ? matchLoser(ubRounds[ubRi].id, i, f1, f2) : null)
+      }
+      const toPairs = (slots: (string | null)[]): Pair[] => {
+        const pairs: Pair[] = []
+        for (let i = 0; i + 1 < slots.length; i += 2) pairs.push([slots[i], slots[i + 1]])
+        return pairs
+      }
+
       const lbRoundPairs: Pair[][] = []
       {
-        const r0: Pair[] = []
-        for (let i = 0; i + 1 < lbDirectSlots.length; i += 2)
-          r0.push([lbDirectSlots[i], lbDirectSlots[i + 1]])
-        lbRoundPairs.push(r0)
-
+        lbRoundPairs.push(toPairs(lbRoundSlots(lbDirectSlots, dropoutsFor(0))))
         for (let ri = 1; ri < lbRounds.length; ri++) {
-          const round = lbRounds[ri]
           const prevWinners = lbRoundPairs[ri - 1].map(([f1, f2], i) =>
             (f1 && f2) ? matchWinner(lbRounds[ri - 1].id, i, f1, f2) : null)
-          let slotsForRound: (string | null)[] = [...prevWinners]
-
-          if (round.dropdownsFrom) {
-            const ubRi = ubRounds.findIndex(r => r.id === round.dropdownsFrom)
-            if (ubRi >= 0) {
-              const losers = ubRoundPairs[ubRi].map(([f1, f2], i) =>
-                (f1 && f2) ? matchLoser(ubRounds[ubRi].id, i, f1, f2) : null)
-              slotsForRound = []
-              for (let i = 0; i < prevWinners.length; i++) {
-                slotsForRound.push(prevWinners[i])
-                slotsForRound.push(losers[i] ?? null)
-              }
-            }
-          }
-
-          const pairs: Pair[] = []
-          for (let i = 0; i + 1 < slotsForRound.length; i += 2)
-            pairs.push([slotsForRound[i], slotsForRound[i + 1]])
-          lbRoundPairs.push(pairs)
+          lbRoundPairs.push(toPairs(lbRoundSlots(prevWinners, dropoutsFor(ri))))
         }
       }
 
       // Helpers. Раунд адресуется своим id, ячейка — индексом пары в раунде.
       const isComplete = (pairs: Pair[], roundId: string): boolean =>
-        pairs.every(([f1, f2], i) => lookup.find(roundId, i, f1, f2)?.status === 'Completed')
+        pairs.every(([f1, f2], i) => !!decidedWinner(lookup.find(roundId, i, f1, f2)))
       // Двойное поражение — бой законченный (АР-16), «незавершённым» он не
       // считается. Но и победителя из него нет, поэтому `isComplete` его не
       // засчитывает, и обход останавливается — с объяснением ниже.
       const hasUnfinished = (pairs: Pair[], roundId: string): boolean =>
         pairs.some(([f1, f2], i) => {
           const m = lookup.find(roundId, i, f1, f2)
-          return !!(m && m.status !== 'Completed' && m.status !== 'DoubleLoss')
+          return !!(m && !isFinishedMatch(m))
         })
 
       const doubleLossCell = (): string | null => {
@@ -1119,7 +1120,21 @@ export default function TournamentDetailPage() {
                     {participantClub(p) && <span style={{ color: '#888', marginLeft: 6 }}>({participantClub(p)})</span>}
                   </span>
                   <button
-                    onClick={() => removeParticipantMut.mutate(p.participantId)}
+                    onClick={() => {
+                      // Вне черновика снятие — не правка списка, а вмешательство
+                      // в идущий турнир: бои снятого остаются, а заявить его
+                      // обратно можно только новым участником, который в
+                      // сохранённые группы уже не вернётся. Спрашиваем.
+                      if (tournament.status !== 'Draft' && !window.confirm(
+                        `Снять «${participantName(p)}» с турнира?
+
+` +
+                        'Турнир уже не в черновике: созданные бои этого участника останутся в списке ' +
+                        'встреч — их придётся отменить вручную. Повторная заявка создаст нового ' +
+                        'участника, и в сохранённый состав групп он сам не вернётся.'
+                      )) return
+                      removeParticipantMut.mutate(p.participantId)
+                    }}
                     disabled={removeParticipantMut.isPending}
                     style={{ color: '#c00', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.85em' }}
                     title="Снять с турнира"

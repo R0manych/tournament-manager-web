@@ -10,7 +10,7 @@ import type {
 export const encountersApi = {
   listByTournament: (tournamentId: string) =>
     api.get<Encounter[]>(`/tournaments/${tournamentId}/encounters`),
-  get: (id: string) => api.get<Encounter>(`/encounters/${id}`),
+  get: (id: string, signal?: AbortSignal) => api.get<Encounter>(`/encounters/${id}`, signal),
   create: (tournamentId: string, data: CreateEncounterRequest) =>
     api.post<Encounter>(`/tournaments/${tournamentId}/encounters`, data),
   delete: (id: string) => api.delete(`/encounters/${id}`),

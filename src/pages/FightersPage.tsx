@@ -17,7 +17,7 @@ export default function FightersPage() {
       <ul>
         {fighters?.map(f => (
           <li key={f.id}>
-            {f.firstName} {f.lastName} {f.club && `— ${f.club}`} {f.city && `(${f.city})`}
+            {f.firstName} {f.lastName} {f.club && `— ${f.club}`}
           </li>
         ))}
       </ul>

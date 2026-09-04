@@ -230,14 +230,23 @@ export default function RoundRobinPhaseView({
 
       {/* Пул нераспределённых. Показывается и в заблокированном виде: участник,
           которого не видно нигде, — это тот же молчаливый пропуск, из-за
-          которого дозаявленный выпадал из группового этапа. */}
-      {pending.length > 0 && (
+          которого дозаявленный выпадал из группового этапа.
+          В режиме правки блок не исчезает, когда пул опустел: он остаётся
+          зоной, куда участника перетаскивают обратно (и куда его роняют, если
+          промахнулись мимо группы). Раньше блок пропадал в момент последнего
+          переноса — вместе с единственной возможностью отменить его. */}
+      {(pending.length > 0 || editable) && (
         <div
           onDragOver={editable ? e => e.preventDefault() : undefined}
           onDrop={editable ? e => { e.preventDefault(); moveTo(POOL, null) } : undefined}
           style={POOL_BOX}
         >
           <div style={POOL_HEAD}>Без группы ({pending.length})</div>
+          {pending.length === 0 && (
+            <p style={{ padding: '6px 12px', color: '#a86500', fontSize: 12, margin: 0 }}>
+              Все распределены. Перетащите сюда, чтобы исключить из групп.
+            </p>
+          )}
           <table style={{ borderCollapse: 'collapse', width: '100%' }}>
             <tbody>
               {pending.map(p => (
@@ -323,6 +332,10 @@ export default function RoundRobinPhaseView({
                         <th style={TH_NUM} title="Победы">В</th>
                         <th style={TH_NUM} title="Ничьи">Н</th>
                         <th style={TH_NUM} title="Поражения">П</th>
+                        {/* Разница ударов — тай-брейкер: по ней таблица и
+                            сортируется, а от порядка зависит посев плейофф.
+                            Без колонки порядок при равных очках необъясним. */}
+                        <th style={TH_NUM} title="Разница ударов">±</th>
                         <th style={TH_NUM} title="Очки">Оч</th>
                       </>}
                     </tr>
@@ -350,6 +363,9 @@ export default function RoundRobinPhaseView({
                           <td style={{ ...TD_NUM, color: '#2a7a2a', fontWeight: 600 }}>{row.standing.wins}</td>
                           <td style={TD_NUM}>{row.standing.draws}</td>
                           <td style={{ ...TD_NUM, color: '#a00' }}>{row.standing.losses}</td>
+                          <td style={TD_NUM}>
+                            {row.standing.scoreDiff > 0 ? `+${row.standing.scoreDiff}` : row.standing.scoreDiff}
+                          </td>
                           <td style={{ ...TD_NUM, fontWeight: 600 }}>{row.standing.points}</td>
                         </>}
                       </tr>

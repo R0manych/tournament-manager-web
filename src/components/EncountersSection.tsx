@@ -39,7 +39,7 @@ export default function EncountersSection({ tournamentId, participants }: Props)
   const [p1, setP1] = useState('')
   const [p2, setP2] = useState('')
 
-  const { data: encounters } = useQuery({
+  const { data: encounters, isLoading: encountersLoading, isError: encountersFailed } = useQuery({
     queryKey: ['encounters', tournamentId],
     queryFn: () => encountersApi.listByTournament(tournamentId),
   })
@@ -65,6 +65,14 @@ export default function EncountersSection({ tournamentId, participants }: Props)
     const p = participants.find(x => x.participantId === id)
     return p ? participantName(p) : id.slice(0, 8)
   }
+
+  // Пары, у которых серия уже заведена. Второй `Encounter` на ту же пару
+  // сервер не запрещает, а таблица группы считает обе — и команда получает
+  // лишнюю победу без видимой причины. Автогенерация группового этапа
+  // дедуплицирует так же (по `pairKey` в `TournamentDetailPage`).
+  const pairKey = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`)
+  const existingPairs = new Set((encounters ?? []).map(e => pairKey(e.participant1Id, e.participant2Id)))
+  const pairTaken = (a: string, b: string) => !!a && !!b && existingPairs.has(pairKey(a, b))
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -92,7 +100,15 @@ export default function EncountersSection({ tournamentId, participants }: Props)
     <div>
       <h2>Командные встречи ({encounters?.length ?? 0})</h2>
 
-      {(!encounters || encounters.length === 0) ? (
+      {encountersLoading ? (
+        <p style={{ color: '#888' }}>Загрузка встреч…</p>
+      ) : encountersFailed ? (
+        // Иначе сорванный запрос выглядел бы как «встреч нет», и организатор
+        // начинал заводить их заново поверх уже существующих.
+        <p style={{ color: '#c00' }} role="alert">
+          Не удалось загрузить встречи. Обновите страницу — список ниже не полон.
+        </p>
+      ) : (encounters?.length ?? 0) === 0 ? (
         <p style={{ color: '#888' }}>Встреч пока нет</p>
       ) : (
         grouped
@@ -160,13 +176,17 @@ export default function EncountersSection({ tournamentId, participants }: Props)
 
       {participants.length >= 2 && (
         <form
-          onSubmit={e => { e.preventDefault(); if (p1 && p2 && p1 !== p2) createMut.mutate() }}
+          onSubmit={e => { e.preventDefault(); if (p1 && p2 && p1 !== p2 && !pairTaken(p1, p2)) createMut.mutate() }}
           style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 12 }}
         >
           <select value={p1} onChange={e => setP1(e.target.value)} required style={{ minWidth: 160 }}>
             <option value="">— команда 1 —</option>
             {participants.map(p => (
-              <option key={p.participantId} value={p.participantId} disabled={p.participantId === p2}>
+              <option
+                key={p.participantId}
+                value={p.participantId}
+                disabled={p.participantId === p2 || pairTaken(p.participantId, p2)}
+              >
                 {participantName(p)}
               </option>
             ))}
@@ -175,14 +195,27 @@ export default function EncountersSection({ tournamentId, participants }: Props)
           <select value={p2} onChange={e => setP2(e.target.value)} required style={{ minWidth: 160 }}>
             <option value="">— команда 2 —</option>
             {participants.map(p => (
-              <option key={p.participantId} value={p.participantId} disabled={p.participantId === p1}>
+              <option
+                key={p.participantId}
+                value={p.participantId}
+                disabled={p.participantId === p1 || pairTaken(p1, p.participantId)}
+              >
                 {participantName(p)}
               </option>
             ))}
           </select>
-          <button type="submit" disabled={!p1 || !p2 || p1 === p2 || createMut.isPending}>
+          <button
+            type="submit"
+            disabled={!p1 || !p2 || p1 === p2 || pairTaken(p1, p2) || createMut.isPending}
+            title={pairTaken(p1, p2) ? 'Встреча этой пары уже заведена' : undefined}
+          >
             {createMut.isPending ? '…' : '+ Создать встречу'}
           </button>
+          {pairTaken(p1, p2) && (
+            <span style={{ color: '#a86500', fontSize: '0.85em' }}>
+              Встреча этой пары уже есть — вторая исказит таблицу группы
+            </span>
+          )}
         </form>
       )}
     </div>

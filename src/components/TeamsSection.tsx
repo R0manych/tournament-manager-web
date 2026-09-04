@@ -18,7 +18,7 @@ export default function TeamsSection({ tournamentId, participants }: Props) {
   const [club, setClub] = useState('')
   const [city, setCity] = useState('')
 
-  const { data: teams } = useQuery({
+  const { data: teams, isLoading: teamsLoading, isError: teamsFailed } = useQuery({
     queryKey: ['teams', tournamentId],
     queryFn: () => teamsApi.listByTournament(tournamentId),
   })
@@ -35,23 +35,33 @@ export default function TeamsSection({ tournamentId, participants }: Props) {
     qc.invalidateQueries({ queryKey: ['tournaments', tournamentId] })
   }
 
-  // One-step: create the team, then register it on the tournament.
+  // Создание и заявка — два разных действия (ТЗ §5.2): состав из трёх бойцов
+  // проверяется «при попытке зарегистрировать команду на турнир».
+  //
+  // Раньше это был один шаг, и он давал две поломки сразу: пустая команда
+  // попадала в жеребьёвку и в группы, а ломалась только в разгар турнира —
+  // 409 на `generate-bouts`; а если падал второй вызов, команда оставалась
+  // созданной, но не заявленной, и заявить её было уже нечем.
   const createTeamMut = useMutation({
-    mutationFn: async () => {
-      const team = await teamsApi.create(tournamentId, {
-        name,
-        club: club || undefined,
-        city: city || undefined,
-      })
-      await tournamentsApi.addParticipant(tournamentId, team.id, participants.length + 1)
-      return team
-    },
+    mutationFn: () => teamsApi.create(tournamentId, {
+      name,
+      club: club || undefined,
+      city: city || undefined,
+    }),
     onSuccess: () => {
       setName(''); setClub(''); setCity('')
       invalidate()
     },
     onError: (err: unknown) =>
       alert((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Ошибка создания команды'),
+  })
+
+  const registerTeamMut = useMutation({
+    mutationFn: (teamId: string) =>
+      tournamentsApi.addParticipant(tournamentId, teamId, participants.length + 1),
+    onSuccess: invalidate,
+    onError: (err: unknown) =>
+      alert((err as { problem?: { detail?: string } })?.problem?.detail ?? 'Не удалось заявить команду'),
   })
 
   const deleteTeamMut = useMutation({
@@ -74,7 +84,15 @@ export default function TeamsSection({ tournamentId, participants }: Props) {
     <div>
       <h2>Команды ({teams?.length ?? 0})</h2>
 
-      {(!teams || teams.length === 0) && (
+      {teamsLoading && <p style={{ color: '#888' }}>Загрузка команд…</p>}
+      {/* Ошибка загрузки не должна выглядеть как «команд нет»: иначе команды
+          заводят повторно поверх уже существующих. */}
+      {teamsFailed && (
+        <p style={{ color: '#c00' }} role="alert">
+          Не удалось загрузить команды. Обновите страницу — список ниже не полон.
+        </p>
+      )}
+      {!teamsLoading && !teamsFailed && (teams?.length ?? 0) === 0 && (
         <p style={{ color: '#888' }}>Команд пока нет</p>
       )}
 
@@ -90,6 +108,8 @@ export default function TeamsSection({ tournamentId, participants }: Props) {
             onDelete={() => {
               if (confirm(`Удалить команду «${team.name}»?`)) deleteTeamMut.mutate(team.id)
             }}
+            onRegister={() => registerTeamMut.mutate(team.id)}
+            registering={registerTeamMut.isPending}
           />
         ))}
       </div>
@@ -105,8 +125,11 @@ export default function TeamsSection({ tournamentId, participants }: Props) {
         <input value={club} onChange={e => setClub(e.target.value)} placeholder="Клуб" style={{ width: 130 }} />
         <input value={city} onChange={e => setCity(e.target.value)} placeholder="Город" style={{ width: 110 }} />
         <button type="submit" disabled={!name.trim() || createTeamMut.isPending}>
-          {createTeamMut.isPending ? '…' : '+ Создать и зарегистрировать'}
+          {createTeamMut.isPending ? '…' : '+ Создать команду'}
         </button>
+        <span style={{ color: '#888', fontSize: '0.85em' }}>
+          Заявить на турнир — кнопкой на карточке, когда в составе трое
+        </span>
       </form>
     </div>
   )
@@ -115,12 +138,14 @@ export default function TeamsSection({ tournamentId, participants }: Props) {
 // ─── Team card with roster (3 positions) ────────────────────────────────────
 
 function TeamCard({
-  team, registered, availableFighters, onDelete,
+  team, registered, availableFighters, onDelete, onRegister, registering,
 }: {
   team: Team
   registered: boolean
   availableFighters: Array<{ id: string; firstName: string; lastName: string; club?: string }>
   onDelete: () => void
+  onRegister: () => void
+  registering: boolean
 }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
@@ -170,6 +195,19 @@ function TeamCard({
           <span style={{ fontSize: '0.78em', color: '#c00' }}>не зарегистрирована</span>
         )}
         <span style={{ flex: 1 }} />
+        {!registered && (
+          <button
+            onClick={e => { e.stopPropagation(); onRegister() }}
+            disabled={!full || registering}
+            title={full
+              ? 'Заявить команду на турнир'
+              : 'Сначала укомплектуйте состав: ровно три бойца на позициях 1–3 (ТЗ §5.2). ' +
+                'Неукомплектованная команда доедет до групп и сломается на генерации боёв серии.'}
+            style={{ fontSize: '0.85em', marginRight: 8 }}
+          >
+            {registering ? '…' : 'Заявить на турнир'}
+          </button>
+        )}
         <button
           onClick={e => { e.stopPropagation(); onDelete() }}
           style={{ color: '#c00', background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.85em' }}

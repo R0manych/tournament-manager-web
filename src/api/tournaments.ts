@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { Tournament, TournamentFormat, TournamentStatus, CreateTournamentRequest, UpdateTournamentRequest } from './types'
+import type { Tournament, TournamentSummary, TournamentFormat, TournamentStatus, CreateTournamentRequest, UpdateTournamentRequest } from './types'
 
 // A forced write goes through while the tournament is out of Draft and discards the
 // saved group compositions the new format no longer describes (all of them on delete),
@@ -16,10 +16,12 @@ const headerCount = (headers: Headers, name: string) => Number(headers.get(name)
 const forceQuery = (force: boolean) => (force ? '?force=true' : '')
 
 export const tournamentsApi = {
-  list: () => api.get<Tournament[]>('/tournaments'),
+  // Список отдаёт сводку без состава участников — см. `TournamentSummary`.
+  list: () => api.get<TournamentSummary[]>('/tournaments'),
   get: (id: string) => api.get<Tournament>(`/tournaments/${id}`),
   create: (data: CreateTournamentRequest) => api.post<Tournament>('/tournaments', data),
-  update: (id: string, data: UpdateTournamentRequest) => api.put<Tournament>(`/tournaments/${id}`, data),
+  // 204 No Content: тела в ответе нет, обещать сущность нельзя.
+  update: (id: string, data: UpdateTournamentRequest) => api.put<void>(`/tournaments/${id}`, data),
   delete: (id: string) => api.delete(`/tournaments/${id}`),
   setStatus: (id: string, status: TournamentStatus) =>
     api.patch<Tournament>(`/tournaments/${id}/status`, { status }),

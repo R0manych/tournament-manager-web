@@ -7,8 +7,9 @@ export const teamsApi = {
   get: (teamId: string) => api.get<Team>(`/teams/${teamId}`),
   create: (tournamentId: string, data: CreateTeamRequest) =>
     api.post<Team>(`/tournaments/${tournamentId}/teams`, data),
+  // 204 No Content — тела нет.
   update: (teamId: string, data: CreateTeamRequest) =>
-    api.put<Team>(`/teams/${teamId}`, data),
+    api.put<void>(`/teams/${teamId}`, data),
   delete: (teamId: string) => api.delete(`/teams/${teamId}`),
 
   addMember: (teamId: string, data: AddTeamMemberRequest) =>

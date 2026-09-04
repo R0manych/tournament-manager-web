@@ -153,9 +153,14 @@ export default function TournamentMatchesPage() {
 
   const isTeam = tournament?.participantKind === 'Team'
 
+  // Канонический ключ списка встреч турнира — `['tournament-matches', id]`
+  // (B-7). Под `['matches', <uuid>]` живёт ОДНА встреча (`MatchPage`,
+  // `MatchBoard`), и список под тем же префиксом не видел ни одной инвалидации
+  // от генерации встреч и смены счёта: страница показывала устаревшие данные
+  // до случайного рефетча по фокусу.
   const { data: matches, isLoading: mLoading } = useQuery({
-    queryKey: ['matches', id],
-    queryFn: () => matchesApi.listByTournament(id!),
+    queryKey: ['tournament-matches', id],
+    queryFn: ({ signal }) => matchesApi.listByTournament(id!, undefined, signal),
     // Team tournaments are navigated as encounters (team windows), not flat bouts.
     enabled: !!id && tournament != null && !isTeam,
   })

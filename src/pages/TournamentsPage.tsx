@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { tournamentsApi } from '../api/tournaments'
+import { TOURNAMENT_STATUS_LABELS } from '../api/types'
 
 export default function TournamentsPage() {
   const { data: tournaments, isLoading, error } = useQuery({
@@ -27,7 +28,10 @@ export default function TournamentsPage() {
                   иначе в списке останутся висящие точки. */}
               {t.nomination && <span style={{ color: '#888' }}> · {t.nomination}</span>}
               {' — '}
-              {t.status}
+              {/* Тот же словарь, что в шапке турнира: сырой enum («Draft»,
+                  «Completed») на главном экране был единственным
+                  непереведённым местом. */}
+              {TOURNAMENT_STATUS_LABELS[t.status] ?? t.status}
             </Link>
           </li>
         ))}

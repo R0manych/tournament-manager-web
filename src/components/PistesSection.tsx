@@ -47,10 +47,30 @@ export default function PistesSection({ tournamentId }: { tournamentId: string }
 
   // Меняем местами соседей по `orderIndex`: сервер сортирует по нему, и после
   // двух записей порядок в списке совпадает с порядком площадок в зале.
-  const swap = (a: Piste, b: Piste) => {
-    updateMut.mutate({ id: a.id, name: a.name, orderIndex: b.orderIndex })
-    updateMut.mutate({ id: b.id, name: b.name, orderIndex: a.orderIndex })
-  }
+  //
+  // Строго последовательно и с откатом: две независимые записи оставляли двум
+  // ристалищам ОДИН `orderIndex`, если вторая падала (уникального индекса на
+  // бэке нет). Дальше порядок решал `CreatedAt`, и кнопки ↑/↓ для этой пары
+  // переставали что-либо менять — с одним лишь alert'ом в объяснение.
+  const swapMut = useMutation({
+    mutationFn: async ({ a, b }: { a: Piste; b: Piste }) => {
+      await pistesApi.update(a.id, { name: a.name, orderIndex: b.orderIndex })
+      try {
+        await pistesApi.update(b.id, { name: b.name, orderIndex: a.orderIndex })
+      } catch (err) {
+        // Возвращаем первую площадку на место: одинаковый порядок у двух
+        // ристалищ хуже, чем несостоявшаяся перестановка.
+        await pistesApi.update(a.id, { name: a.name, orderIndex: a.orderIndex }).catch(() => {})
+        throw err
+      }
+    },
+    onSuccess: invalidate,
+    onError: (err: unknown) => {
+      invalidate()
+      onError('Не удалось изменить порядок ристалищ')(err)
+    },
+  })
+  const swap = (a: Piste, b: Piste) => swapMut.mutate({ a, b })
 
   return (
     <div style={{ margin: '16px 0' }}>
