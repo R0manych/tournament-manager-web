@@ -26,6 +26,7 @@ import PisteAssign from '../components/PisteAssign'
 import { usePistes } from '../components/usePistes'
 import { pisteBoardPath } from '../lib/pisteBoard'
 import { SIDE1, SIDE2 } from '../lib/sideColors'
+import { orderMatchesForPlay } from '../components/bracket/bracketUtils'
 
 // ─── Fight Timer ──────────────────────────────────────────────────────────────
 
@@ -245,6 +246,18 @@ export default function MatchPage() {
   // Ристалища турнира: подпись площадки и ссылка на её табло. Пустой список —
   // штатный турнир на одной площадке (docs/09 §3.3), тогда всё это не рисуется.
   const { data: pistes } = usePistes(match?.tournamentId)
+  const hasPistes = (pistes?.length ?? 0) > 0
+
+  // Формат — только ради порядка соседних боёв: он задаёт очерёдность фаз и
+  // раундов, без него ячейки выстроились бы по своим id. 404 — законный ответ
+  // (формат не загружен), повторять запрос незачем.
+  const { data: format } = useQuery({
+    queryKey: ['tournament-format', match?.tournamentId],
+    queryFn: () => tournamentsApi.format.get(match!.tournamentId),
+    enabled: !!match?.tournamentId,
+    retry: (failureCount, error: unknown) =>
+      (error as { status?: number })?.status !== 404 && failureCount < 2,
+  })
 
   // Якорь отсчёта — `currentRoundStartedAt` (ТЗ §7.4). Перехода раунда в UI нет
   // (раундов в дисциплине нет, серия — это отдельные встречи, АР-15), поэтому
@@ -687,20 +700,42 @@ export default function MatchPage() {
       ? tournament?.participants.find(p => p.participantId === encounter.priorityParticipantId)
       : undefined
 
-  // Adjacent match navigation
-  const sortedMatches = [...(tournamentMatches ?? [])].sort((a, b) => {
-    const ta = a.scheduledAt ?? a.createdAt
-    const tb = b.scheduledAt ?? b.createdAt
-    return ta.localeCompare(tb)
-  })
-  const currentIdx = sortedMatches.findIndex(m => m.id === id)
+  // ─── Соседние бои ───────────────────────────────────────────────────────────
+  // Порядок — тот же, что в списке встреч и на табло (`orderMatchesForPlay`):
+  // ячейки по формату, внутри ячейки очередь боёв. Раньше здесь была своя
+  // сортировка по времени, и пульт звал одну пару, а зал обещал другую — у
+  // сгенерированных одним запросом встреч `createdAt` совпадает до
+  // миллисекунды, поэтому время само по себе порядка не задавало.
+  const ordered = orderMatchesForPlay(tournamentMatches ?? [], format)
+
+  // Ристалища заведены — очередь принадлежит площадке: следующим на пульте
+  // должен быть следующий бой ЭТОГО ристалища, а не турнира. Иначе оператор
+  // зовёт пару, которая пойдёт на соседней площадке.
+  const scopeMatches = hasPistes
+    ? ordered.filter(m => m.effectivePisteId === match.effectivePisteId)
+    : ordered
+
+  // Бой без площадки при заведённых ристалищах: очереди у него нет вовсе, и
+  // подставлять общетурнирную нельзя — она соврёт. Ниже про это предупреждение.
+  const unassigned = hasPistes && match.effectivePisteId == null
+
+  const currentIdx = unassigned ? -1 : scopeMatches.findIndex(m => m.id === id)
   // Bouts are navigated through their encounter page, not the flat match list.
-  const prevMatch = !isBout && currentIdx > 0 ? sortedMatches[currentIdx - 1] : null
-  const nextMatch = !isBout && currentIdx >= 0 && currentIdx < sortedMatches.length - 1
-    ? sortedMatches[currentIdx + 1]
+  const prevMatch = !isBout && currentIdx > 0 ? scopeMatches[currentIdx - 1] : null
+  const nextMatch = !isBout && currentIdx >= 0 && currentIdx < scopeMatches.length - 1
+    ? scopeMatches[currentIdx + 1]
     : null
 
-  function matchLabel(m: typeof sortedMatches[0]) {
+  // Предупреждение вместо молчания: с ристалищами пустая навигация означает
+  // «на этой площадке больше ничего не назначено», и оператор должен узнать об
+  // этом здесь, а не выяснить у ковра.
+  const queueWarning =
+    isBout || !hasPistes ? null
+    : unassigned ? 'Бой не назначен на ристалище — очередь площадки неизвестна'
+    : !nextMatch ? `На ристалище «${matchPiste?.name ?? '—'}» это последний назначенный бой`
+    : null
+
+  function matchLabel(m: typeof ordered[0]) {
     const p1 = tournament?.participants.find(p => p.participantId === m.fighter1Id)
     const p2 = tournament?.participants.find(p => p.participantId === m.fighter2Id)
     return `${p1 ? participantShortName(p1) : '?'} – ${p2 ? participantShortName(p2) : '?'}`
@@ -796,6 +831,25 @@ export default function MatchPage() {
           >
             {matchLabel(nextMatch)} →
           </Link>
+        )}
+        {/* Очередь площадки кончилась (или бой на неё не назначен). Пустая
+            навигация выглядела бы как «дальше ничего нет по турниру», а это
+            другое утверждение — поэтому говорим прямо. */}
+        {queueWarning && (
+          <span
+            title="Следующий бой берётся из очереди этого ристалища. Назначьте на площадку следующую встречу — она появится здесь."
+            style={{
+              whiteSpace: 'nowrap',
+              fontSize: '0.85em',
+              padding: '2px 10px',
+              borderRadius: 10,
+              background: '#fff4e5',
+              color: '#a86500',
+              fontWeight: 600,
+            }}
+          >
+            ⚠ {queueWarning}
+          </span>
         )}
       </div>
 

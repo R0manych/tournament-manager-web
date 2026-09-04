@@ -7,7 +7,8 @@ import { teamsApi } from '../../api/teams'
 import { tournamentsApi } from '../../api/tournaments'
 import type { Encounter, Match, Team, Tournament, TournamentFormat } from '../../api/types'
 import { participantName } from '../../api/types'
-import { buildBoutOrder, compareBoutOrder } from '../bracket/bracketUtils'
+import { orderMatchesForPlay } from '../bracket/bracketUtils'
+import { usePistes } from '../usePistes'
 import { formatClock, formatCountdown, remainingSeconds, remainingUntil } from '../../lib/timer'
 import { readTimerOffset, timerOffsetKey } from '../../lib/timerOffset'
 import type { TimerOffset } from '../../lib/timerOffset'
@@ -69,11 +70,23 @@ export default function MatchBoard({
     refetchInterval: q => (q.state.data?.status === 'InProgress' ? 2000 : false),
   })
 
+  // Заведены ли площадки вообще. От этого зависит не оформление, а само право
+  // обещать залу следующую пару: с ристалищами очередь принадлежит площадке, и
+  // общетурнирная «следующая пара» становится неверной (docs/09 §1.1, дефект 3).
+  const { data: pistes } = usePistes(match?.tournamentId)
+  const hasPistes = (pistes?.length ?? 0) > 0
+
+  // Площадка, чью очередь показываем. У закреплённого табло (`/display/match/:id`)
+  // и табло турнира пропа `piste` нет, но бой всё равно может стоять на
+  // ристалище — тогда берём его: очередь определяется данными боя, а не тем,
+  // по какой ссылке открыли экран.
+  const scopePisteId = piste?.id ?? match?.effectivePisteId
+
   // Только ради «следующей пары»: список боёв турнира / составы команд.
-  // На табло ристалища выборка сужена площадкой — очередь у каждой своя.
+  // Выборка сужена площадкой, если она известна — очередь у каждой своя.
   const { data: tournamentMatches } = useQuery({
-    queryKey: ['tournament-matches', match?.tournamentId, piste?.id ?? null],
-    queryFn: () => matchesApi.listByTournament(match!.tournamentId, piste?.id),
+    queryKey: ['tournament-matches', match?.tournamentId, scopePisteId ?? null],
+    queryFn: () => matchesApi.listByTournament(match!.tournamentId, scopePisteId),
     enabled: !!match?.tournamentId && !match?.encounterId,
     refetchInterval: 10_000,
   })
@@ -188,7 +201,10 @@ export default function MatchBoard({
   }
   const expired = seconds != null && totalSeconds != null && seconds === 0
 
-  const nextPair = resolveNextPair({ match, encounter, tournament, tournamentMatches, teams, format })
+  const nextPair = resolveNextPair({
+    match, encounter, tournament, tournamentMatches, teams, format,
+    hasPistes, scopePisteId,
+  })
 
   return (
     <Screen>
@@ -305,7 +321,17 @@ export function WaitingBoard({
       (error as { status?: number })?.status !== 404 && failureCount < 2,
   })
 
-  const next = byStartOrder(matches ?? [], format).find(m => m.status === 'Scheduled')
+  const { data: pistes } = usePistes(tournamentId)
+  const hasPistes = (pistes?.length ?? 0) > 0
+
+  // Экран ожидания подчиняется тому же правилу, что и карточка боя: с
+  // заведёнными ристалищами очередь принадлежит площадке, и табло без площадки
+  // (`/display/tournament/:id`) следующую пару не обещает — она была бы взята
+  // по всему турниру и почти наверняка пошла бы не здесь.
+  const scoped = !hasPistes || piste != null
+  const next = scoped
+    ? orderMatchesForPlay(matches ?? [], format).find(m => m.status === 'Scheduled')
+    : undefined
   const label = next && tournament ? pairLabel(next, tournament) : null
 
   return (
@@ -506,21 +532,6 @@ function BoutContext({
 
 // ─── Следующая пара ───────────────────────────────────────────────────────────
 
-// Порядок тот же, что в списке встреч у организатора: очередь боёв внутри
-// ячейки (`buildBoutOrder`), ячейки — по формату. Сортировка по времени
-// осталась запасной ступенью для встреч без размещения: у сгенерированных
-// одним запросом `createdAt` совпадает до миллисекунды, поэтому сама по себе
-// она порядка не задаёт.
-function byStartOrder(
-  matches: Match[],
-  format: TournamentFormat | undefined,
-): Match[] {
-  const order = buildBoutOrder(matches)
-  return [...matches]
-    .sort((a, b) => (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt))
-    .sort((a, b) => compareBoutOrder(a, b, format, order))
-}
-
 function pairLabel(match: Match, tournament: Tournament): string {
   const name = (id?: string) => {
     const p = tournament.participants.find(x => x.participantId === id)
@@ -538,8 +549,13 @@ function resolveNextPair(args: {
   tournamentMatches?: Match[]
   teams?: Team[]
   format?: TournamentFormat
+  /** В турнире заведена хотя бы одна площадка. */
+  hasPistes: boolean
+  /** Площадка, чью очередь показываем; `undefined` — бой ни на какой не стоит. */
+  scopePisteId?: string
 }): string | null {
   const { match, encounter, tournament, tournamentMatches, teams, format } = args
+  const { hasPistes, scopePisteId } = args
 
   // Боут: следующий бой той же серии, имена — из составов команд.
   if (match.encounterId) {
@@ -557,7 +573,13 @@ function resolveNextPair(args: {
   }
 
   if (!tournament || !tournamentMatches) return null
-  const ordered = byStartOrder(tournamentMatches, format)
+
+  // Ристалища заведены, а бой ни на одно не назначен — очереди у него нет.
+  // Общетурнирная «следующая пара» здесь была бы обещанием, за которое никто
+  // не отвечает: следующей на этой площадке она не станет.
+  if (hasPistes && !scopePisteId) return null
+
+  const ordered = orderMatchesForPlay(tournamentMatches, format)
   const idx = ordered.findIndex(m => m.id === match.id)
   const next = ordered.slice(idx + 1).find(m => m.status === 'Scheduled')
   return next ? pairLabel(next, tournament) : null

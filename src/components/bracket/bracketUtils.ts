@@ -344,6 +344,26 @@ export function compareBoutOrder(
   return comparePlacements(key(a), key(b), format)
 }
 
+/**
+ * Порядок проведения боёв — тот же, что в списке встреч у организатора: ячейки
+ * по формату, внутри ячейки — очередь боёв. Сортировка по времени осталась
+ * запасной ступенью для встреч без размещения: у сгенерированных одним запросом
+ * `createdAt` совпадает до миллисекунды, поэтому сама по себе порядка не задаёт.
+ *
+ * Один вызов на все три экрана (список, карточка боя, табло): «следующий бой»
+ * обязан означать одно и то же везде, иначе пульт зовёт одну пару, а зал
+ * обещает другую.
+ */
+export function orderMatchesForPlay<T extends OrderableMatch & { scheduledAt?: string; createdAt: string }>(
+  matches: T[],
+  format: TournamentFormat | null | undefined,
+): T[] {
+  const order = buildBoutOrder(matches)
+  return [...matches]
+    .sort((a, b) => (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt))
+    .sort((a, b) => compareBoutOrder(a, b, format, order))
+}
+
 export function describePlacement(
   placement: MatchPlacementRef | undefined,
   format: TournamentFormat | null | undefined,
