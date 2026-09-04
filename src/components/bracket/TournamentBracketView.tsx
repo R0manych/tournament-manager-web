@@ -3,7 +3,7 @@ import type { SaveGroupItem, TournamentGroup } from '../../api/groups'
 import {
   buildPhaseStandingsCache, buildSwissPool,
   buildBracketRounds, calculateGroupStandings, encountersToStandingsMatches,
-  matchesOfPhase, resolveDEFromCache, resolveSESlotIds,
+  matchesOfPhase, resolveDEFromCache, resolveSESlotIds, savedGroupsDrift,
   type PhaseStandingsCache,
 } from './bracketUtils'
 import type { DEPhase } from './bracketUtils'
@@ -89,6 +89,12 @@ export default function TournamentBracketView({
           }
 
           const isSnakePhase = !p.seeding?.groups
+          // Расхождение сохранённого состава с текущей заявкой — только для
+          // snake-фаз: состав фазы с явным посевом резолвится из таблиц
+          // предыдущей и на сервере не хранится, там расходиться нечему.
+          const drift = isSnakePhase
+            ? savedGroupsDrift(savedGroups, phase.id, participants)
+            : { unassigned: [], withdrawnCount: 0 }
           return (
             <RoundRobinPhaseView
               key={phase.id}
@@ -101,6 +107,8 @@ export default function TournamentBracketView({
               lockedNote={isSnakePhase ? groupsLockedNote : undefined}
               generateLabel={generateGroupsLabel}
               onGenerate={onGenerateGroups ? items => onGenerateGroups(phase.id, items) : undefined}
+              unassigned={drift.unassigned}
+              withdrawnCount={drift.withdrawnCount}
             />
           )
         }

@@ -555,6 +555,59 @@ export function groupsFromSaved(
   }))
 }
 
+export interface SavedGroupsDrift {
+  /**
+   * Зарегистрированы в турнире, но не лежат ни в одной сохранённой группе фазы.
+   * Почти всегда — те, кого добавили уже после сохранения состава.
+   */
+  unassigned: GroupAssignment['participants']
+  /**
+   * Сколько участников сохранённого состава больше не зарегистрированы (снялись).
+   * Из групп они убраны, но знать об этом организатор обязан: состав ужался, и
+   * сетка группового этапа больше не соответствует сохранённой.
+   */
+  withdrawnCount: number
+}
+
+/**
+ * Расхождение сохранённого состава групп с текущим списком участников.
+ *
+ * Состав групп персистится отдельно от регистрации, и эти два списка живут
+ * своей жизнью: участника можно снять или дозаявить уже после того, как группы
+ * сохранены. `groupsFromSaved` показывает только пересечение — снявшиеся молча
+ * пропадают, а дозаявленные не появляются нигде вовсе, из-за чего их
+ * невозможно ни увидеть, ни перетащить в группу.
+ *
+ * Здесь считается то, что при этом теряется. Возвращает пустое расхождение,
+ * когда для фазы ничего не сохранено: там работает snake-посев, который
+ * раскладывает всех актуальных участников сам.
+ */
+export function savedGroupsDrift(
+  saved: TournamentGroup[] | undefined,
+  phaseId: string,
+  participants: TournamentParticipant[],
+): SavedGroupsDrift {
+  const phaseGroups = (saved ?? []).filter(g => g.phaseId === phaseId)
+  if (phaseGroups.length === 0) return { unassigned: [], withdrawnCount: 0 }
+
+  const savedIds = new Set(phaseGroups.flatMap(g => g.participantIds))
+  const registeredIds = new Set(participants.map(p => p.participantId))
+
+  const unassigned = participants
+    .filter(p => !savedIds.has(p.participantId))
+    .sort((a, b) => (a.seed ?? 999) - (b.seed ?? 999))
+    .map((p, idx) => ({
+      fighterId: p.participantId,
+      seed: p.seed ?? idx + 1,
+      name: participantName(p),
+    }))
+
+  let withdrawnCount = 0
+  for (const id of savedIds) if (!registeredIds.has(id)) withdrawnCount++
+
+  return { unassigned, withdrawnCount }
+}
+
 // Saved composition wins; otherwise snake seeding. Explicit-seeded phases
 // (phase.seeding.groups) are resolved from standings elsewhere and are not
 // persisted.
